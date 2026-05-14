@@ -1,33 +1,46 @@
+# syntax=docker/dockerfile:1.7
+
+ARG GO_VERSION=1.26.2
+ARG ALPINE_VERSION=3.23
+
 # --- Stage 1: Builder ---
-FROM golang:1.24-alpine AS builder
+FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
 
-WORKDIR /app
+WORKDIR /src
 
-# Кешуємо залежності окремо
+# Кешуємо модульний граф окремо від вихідного коду.
 COPY go.mod ./
 RUN go mod download
 
-# Копіюємо вихідний код (тепер зміни в README не скидають кеш збирання)
-COPY main.go ./
+COPY *.go ./
+COPY api/openapi.yaml ./api/openapi.yaml
 
-# Збираємо без налагоджувальної інформації та зі статичним компонуванням
+ARG VERSION=dev
+ARG COMMIT=none
+ARG BUILD_DATE=unknown
+
+# Збираємо статичний Linux-бінарник із build metadata.
 RUN CGO_ENABLED=0 GOOS=linux go build \
-    -ldflags="-s -w" \
-    -o site-checker main.go
+    -trimpath \
+    -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" \
+    -o /out/site-checker .
 
-# --- Stage 2: Final Production Image ---
-FROM alpine:3.19
+# --- Stage 2: Production Image ---
+FROM alpine:${ALPINE_VERSION}
 
 RUN apk --no-cache add ca-certificates
 
-# Створюємо непривілейованого користувача
-RUN adduser -D -u 10001 appuser
-WORKDIR /home/appuser
+# Непривілейований користувач для runtime.
+RUN addgroup -S app && adduser -S -D -H -u 10001 -G app app
 
-# Копіюємо артефакт
-COPY --from=builder /app/site-checker .
+WORKDIR /app
+COPY --from=builder /out/site-checker /app/site-checker
 
-# Переходимо до непривілейованого користувача
-USER appuser
+USER 10001:10001
+EXPOSE 8080
 
-CMD ["./site-checker"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
+    CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1
+
+ENTRYPOINT ["/app/site-checker"]
+

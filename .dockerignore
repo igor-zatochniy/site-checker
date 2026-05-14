@@ -1,0 +1,12 @@
+.git
+.github
+.dockerbuild
+.env
+.env.*
+*.log
+*.out
+*.prof
+*.exe
+bin
+.bin
+site-checker
