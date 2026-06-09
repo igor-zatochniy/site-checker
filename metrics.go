@@ -28,6 +28,7 @@ type Metrics struct {
 	statusByURL         map[string]int
 	upByURL             map[string]bool
 	consecutiveFailures map[string]int
+	dependencyUp        map[string]bool
 }
 
 type MetricsSnapshot struct {
@@ -49,6 +50,7 @@ type MetricsSnapshot struct {
 	StatusByURL         map[string]int
 	UpByURL             map[string]bool
 	ConsecutiveFailures map[string]int
+	DependencyUp        map[string]bool
 }
 
 func NewMetrics(version, commit, buildDate string, totalLinks int) *Metrics {
@@ -61,6 +63,7 @@ func NewMetrics(version, commit, buildDate string, totalLinks int) *Metrics {
 		statusByURL:         make(map[string]int, totalLinks),
 		upByURL:             make(map[string]bool, totalLinks),
 		consecutiveFailures: make(map[string]int, totalLinks),
+		dependencyUp:        make(map[string]bool),
 	}
 }
 
@@ -80,6 +83,12 @@ func (m *Metrics) RecordSkipped() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.jobsSkippedTotal++
+}
+
+func (m *Metrics) SetDependencyUp(name string, up bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dependencyUp[name] = up
 }
 
 func (m *Metrics) RecordResult(result CheckResult) {
@@ -136,6 +145,7 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		StatusByURL:         cloneIntMap(m.statusByURL),
 		UpByURL:             cloneBoolMap(m.upByURL),
 		ConsecutiveFailures: cloneIntMap(m.consecutiveFailures),
+		DependencyUp:        cloneBoolMap(m.dependencyUp),
 	}
 }
 
@@ -214,6 +224,25 @@ func (m *Metrics) Prometheus() string {
 		builder.WriteString(label)
 		builder.WriteString("} ")
 		builder.WriteString(fmt.Sprint(snapshot.ConsecutiveFailures[url]))
+		builder.WriteByte('\n')
+	}
+
+	dependencies := make([]string, 0, len(snapshot.DependencyUp))
+	for dependency := range snapshot.DependencyUp {
+		dependencies = append(dependencies, dependency)
+	}
+	sort.Strings(dependencies)
+	builder.WriteString("# HELP site_checker_dependency_up Last known dependency readiness by dependency name.\n")
+	builder.WriteString("# TYPE site_checker_dependency_up gauge\n")
+	for _, dependency := range dependencies {
+		upValue := 0
+		if snapshot.DependencyUp[dependency] {
+			upValue = 1
+		}
+		builder.WriteString(`site_checker_dependency_up{dependency="`)
+		builder.WriteString(escapeLabelValue(dependency))
+		builder.WriteString(`"} `)
+		builder.WriteString(fmt.Sprint(upValue))
 		builder.WriteByte('\n')
 	}
 
