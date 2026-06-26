@@ -1,7 +1,7 @@
 package main
 
 import (
-	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 )
 
 const (
@@ -19,37 +18,29 @@ const (
 )
 
 type APIHandler struct {
-	store        *MonitorStore
-	checker      *Checker
-	metrics      *Metrics
-	alerts       *AlertManager
-	logger       *slog.Logger
-	totalUpdater func()
+	service *MonitorService
+	apiKey  string
+	logger  *slog.Logger
 }
 
-func NewAPIHandler(store *MonitorStore, checker *Checker, metrics *Metrics, alerts *AlertManager, logger *slog.Logger) *APIHandler {
-	handler := &APIHandler{
-		store:   store,
-		checker: checker,
-		metrics: metrics,
-		alerts:  alerts,
+func NewAPIHandler(service *MonitorService, apiKey string, logger *slog.Logger) *APIHandler {
+	return &APIHandler{
+		service: service,
+		apiKey:  apiKey,
 		logger:  logger,
 	}
-	handler.totalUpdater = func() {
-		metrics.SetTotalLinks(store.Count())
-	}
-	return handler
 }
 
 func (h *APIHandler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/v1/monitors", h.createMonitor)
-	mux.HandleFunc("GET /api/v1/monitors", h.listMonitors)
-	mux.HandleFunc("GET /api/v1/monitors/{id}", h.getMonitor)
-	mux.HandleFunc("PATCH /api/v1/monitors/{id}", h.updateMonitor)
-	mux.HandleFunc("DELETE /api/v1/monitors/{id}", h.deleteMonitor)
-	mux.HandleFunc("GET /api/v1/monitors/{id}/checks", h.listChecks)
-	mux.HandleFunc("POST /api/v1/monitors/{id}/check", h.runManualCheck)
-	mux.HandleFunc("GET /api/v1/monitors/{id}/stats", h.getStats)
+	mux.HandleFunc("POST /api/v1/monitors", h.requireAPIKey(h.createMonitor))
+	mux.HandleFunc("GET /api/v1/monitors", h.requireAPIKey(h.listMonitors))
+	mux.HandleFunc("GET /api/v1/monitors/{id}", h.requireAPIKey(h.getMonitor))
+	mux.HandleFunc("PATCH /api/v1/monitors/{id}", h.requireAPIKey(h.updateMonitor))
+	mux.HandleFunc("DELETE /api/v1/monitors/{id}", h.requireAPIKey(h.deleteMonitor))
+	mux.HandleFunc("GET /api/v1/monitors/{id}/checks", h.requireAPIKey(h.listChecks))
+	mux.HandleFunc("POST /api/v1/monitors/{id}/check", h.requireAPIKey(h.runManualCheck))
+	mux.HandleFunc("GET /api/v1/monitors/{id}/stats", h.requireAPIKey(h.getStats))
+	mux.HandleFunc("GET /api/v1/incidents", h.requireAPIKey(h.listIncidents))
 }
 
 func (h *APIHandler) createMonitor(w http.ResponseWriter, r *http.Request) {
@@ -59,12 +50,11 @@ func (h *APIHandler) createMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	monitor, err := h.store.Create(input)
+	monitor, err := h.service.Create(r.Context(), input)
 	if err != nil {
 		h.writeStoreError(w, err)
 		return
 	}
-	h.totalUpdater()
 	writeJSON(w, http.StatusCreated, monitor)
 }
 
@@ -75,7 +65,11 @@ func (h *APIHandler) listMonitors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, total := h.store.List(offset, limit)
+	items, total, err := h.service.List(r.Context(), offset, limit)
+	if err != nil {
+		h.writeStoreError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":  items,
 		"total":  total,
@@ -85,7 +79,7 @@ func (h *APIHandler) listMonitors(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *APIHandler) getMonitor(w http.ResponseWriter, r *http.Request) {
-	monitor, err := h.store.Get(r.PathValue("id"))
+	monitor, err := h.service.Get(r.Context(), r.PathValue("id"))
 	if err != nil {
 		h.writeStoreError(w, err)
 		return
@@ -100,7 +94,7 @@ func (h *APIHandler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	monitor, err := h.store.Update(r.PathValue("id"), patch)
+	monitor, err := h.service.Update(r.Context(), r.PathValue("id"), patch)
 	if err != nil {
 		h.writeStoreError(w, err)
 		return
@@ -109,12 +103,11 @@ func (h *APIHandler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *APIHandler) deleteMonitor(w http.ResponseWriter, r *http.Request) {
-	err := h.store.Delete(r.PathValue("id"))
+	err := h.service.Delete(r.Context(), r.PathValue("id"))
 	if err != nil {
 		h.writeStoreError(w, err)
 		return
 	}
-	h.totalUpdater()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -125,7 +118,7 @@ func (h *APIHandler) listChecks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, total, err := h.store.ListChecks(r.PathValue("id"), offset, limit)
+	items, total, err := h.service.ListChecks(r.Context(), r.PathValue("id"), offset, limit)
 	if err != nil {
 		h.writeStoreError(w, err)
 		return
@@ -139,36 +132,71 @@ func (h *APIHandler) listChecks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *APIHandler) runManualCheck(w http.ResponseWriter, r *http.Request) {
-	monitor, err := h.store.Get(r.PathValue("id"))
+	record, err := h.service.RunManualCheck(r.Context(), r.PathValue("id"))
 	if err != nil {
 		h.writeStoreError(w, err)
 		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(monitor.TimeoutSeconds)*time.Second)
-	defer cancel()
-
-	result := h.checker.CheckMonitor(ctx, monitor)
-	record := CheckRecordFromResult(result)
-	if _, err := h.store.AddCheck(record); err != nil {
-		h.writeStoreError(w, err)
-		return
-	}
-
-	h.metrics.RecordResult(result)
-	if h.alerts != nil {
-		h.alerts.Handle(r.Context(), result)
 	}
 	writeJSON(w, http.StatusAccepted, record)
 }
 
 func (h *APIHandler) getStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := h.store.Stats(r.PathValue("id"))
+	stats, err := h.service.Stats(r.Context(), r.PathValue("id"))
 	if err != nil {
 		h.writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+func (h *APIHandler) listIncidents(w http.ResponseWriter, r *http.Request) {
+	offset, limit, err := pagination(r)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_pagination", err.Error())
+		return
+	}
+
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	items, total, err := h.service.ListIncidents(r.Context(), status, offset, limit)
+	if err != nil {
+		h.writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":  items,
+		"total":  total,
+		"offset": offset,
+		"limit":  limit,
+	})
+}
+
+func (h *APIHandler) requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
+	if h.apiKey == "" {
+		return next
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if h.validAPIKey(r) {
+			next(w, r)
+			return
+		}
+		writeAPIError(w, http.StatusUnauthorized, "unauthorized", "valid API key is required")
+	}
+}
+
+func (h *APIHandler) validAPIKey(r *http.Request) bool {
+	candidates := []string{
+		strings.TrimSpace(r.Header.Get("X-API-Key")),
+		bearerToken(r.Header.Get("Authorization")),
+	}
+	for _, candidate := range candidates {
+		if candidate == "" || len(candidate) != len(h.apiKey) {
+			continue
+		}
+		if subtle.ConstantTimeCompare([]byte(candidate), []byte(h.apiKey)) == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *APIHandler) writeStoreError(w http.ResponseWriter, err error) {
@@ -224,6 +252,18 @@ func parseNonNegativeInt(raw string, defaultValue int) (int, error) {
 		return 0, fmt.Errorf("value must be a non-negative integer")
 	}
 	return value, nil
+}
+
+func bearerToken(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	scheme, token, ok := strings.Cut(raw, " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
+		return ""
+	}
+	return strings.TrimSpace(token)
 }
 
 func writeAPIError(w http.ResponseWriter, statusCode int, code, message string) {

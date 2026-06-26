@@ -2,14 +2,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
-	"time"
 )
 
 var (
@@ -52,9 +50,14 @@ func main() {
 	defer cancel()
 
 	metrics := NewMetrics(version, commit, buildDate, len(links))
-	store, err := SeedMonitorStore(links, cfg, policy)
+	repo, closeRepo, err := NewConfiguredRepository(ctx, cfg, policy, logger)
 	if err != nil {
-		logger.Error("Failed to initialize monitor store", "error", err)
+		logger.Error("Failed to initialize repository", "error", err)
+		os.Exit(1)
+	}
+	defer closeRepo()
+	if err := SeedRepository(ctx, repo, links, cfg); err != nil {
+		logger.Error("Failed to seed monitors", "error", err)
 		os.Exit(1)
 	}
 
@@ -71,30 +74,31 @@ func main() {
 
 	alerts := NewAlertManager(cfg.AlertWebhookURL, alertClient, metrics, logger, cfg.AlertFailureThreshold, cfg.AlertCooldown)
 	checker := NewChecker(checkClient, cfg, metrics)
-	api := NewAPIHandler(store, checker, metrics, alerts, logger)
+	service := NewMonitorService(repo, checker, metrics, alerts, logger)
+	service.updateTotalLinks(ctx)
+	api := NewAPIHandler(service, cfg.APIKey, logger)
 
-	var observabilityServer *http.Server
-	if cfg.HealthAddr != "" {
-		observabilityServer = NewObservabilityServer(cfg.HealthAddr, cfg, metrics, api.Register, RegisterOpenAPI)
-		listener, err := net.Listen("tcp", cfg.HealthAddr)
+	var queue JobQueue
+	if roleEnabled(cfg.AppRole, "scheduler") || roleEnabled(cfg.AppRole, "worker") {
+		queue, err = NewConfiguredQueue(cfg)
 		if err != nil {
-			logger.Error("Failed to start observability server", "addr", cfg.HealthAddr, "error", err)
+			logger.Error("Failed to initialize queue", "error", err)
 			os.Exit(1)
 		}
+		defer queue.Close()
+	}
 
-		go func() {
-			logger.Info("Observability server started", "addr", cfg.HealthAddr)
-			if err := observabilityServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				logger.Error("Observability server stopped unexpectedly", "error", err)
-				cancel()
-			}
-		}()
+	if cfg.HealthAddr != "" {
+		RunHTTPServer(ctx, cfg, metrics, api, roleEnabled(cfg.AppRole, "api"), BuildReadinessDependencies(cfg, repo, queue), logger, cancel)
 	}
 
 	logger.Info("Site Checker started",
 		"version", version,
 		"commit", commit,
 		"build_date", buildDate,
+		"role", cfg.AppRole,
+		"storage", cfg.StorageType,
+		"queue", cfg.QueueType,
 		"workers", cfg.WorkerCount,
 		"interval", cfg.CheckInterval,
 		"timeout", cfg.HTTPTimeout,
@@ -103,15 +107,26 @@ func main() {
 		"pprof_enabled", cfg.EnablePprof,
 	)
 
-	RunMonitorScheduler(ctx, store, checker, metrics, alerts, cfg.WorkerCount, logger)
-
-	if observabilityServer != nil {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		if err := observabilityServer.Shutdown(shutdownCtx); err != nil {
-			logger.Warn("Observability server shutdown timed out", "error", err)
-		}
+	var wg sync.WaitGroup
+	if queue != nil && roleEnabled(cfg.AppRole, "scheduler") {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			RunQueueScheduler(ctx, service, queue, cfg, logger)
+		}()
+	}
+	if queue != nil && roleEnabled(cfg.AppRole, "worker") {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := RunQueueWorkers(ctx, service, queue, cfg.WorkerCount, logger); err != nil && ctx.Err() == nil {
+				logger.Error("Workers stopped unexpectedly", "error", err)
+				cancel()
+			}
+		}()
 	}
 
+	<-ctx.Done()
+	wg.Wait()
 	logger.Info("Site Checker stopped gracefully")
 }

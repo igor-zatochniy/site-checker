@@ -20,7 +20,8 @@ func TestAPIManageMonitorLifecycle(t *testing.T) {
 	store := NewMonitorStore(policy)
 	metrics := NewMetrics("test", "commit", "date", 0)
 	checker := NewChecker(http.DefaultClient, cfg, metrics)
-	handler := NewAPIHandler(store, checker, metrics, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	service := NewMonitorService(NewInMemoryMonitorRepositoryFromStore(store), checker, metrics, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	handler := NewAPIHandler(service, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	mux := http.NewServeMux()
 	handler.Register(mux)
@@ -72,7 +73,8 @@ func TestAPIReturnsValidationError(t *testing.T) {
 	policy := NewNetworkPolicy(cfg)
 	store := NewMonitorStore(policy)
 	metrics := NewMetrics("test", "commit", "date", 0)
-	handler := NewAPIHandler(store, NewChecker(http.DefaultClient, cfg, metrics), metrics, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	service := NewMonitorService(NewInMemoryMonitorRepositoryFromStore(store), NewChecker(http.DefaultClient, cfg, metrics), metrics, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	handler := NewAPIHandler(service, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	mux := http.NewServeMux()
 	handler.Register(mux)
@@ -83,6 +85,41 @@ func TestAPIReturnsValidationError(t *testing.T) {
 	resp := apiRequest(t, server.URL+"/api/v1/monitors", http.MethodPost, body)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestAPIRequiresAPIKeyWhenConfigured(t *testing.T) {
+	cfg := testCheckerConfig(t)
+	policy := NewNetworkPolicy(cfg)
+	store := NewMonitorStore(policy)
+	metrics := NewMetrics("test", "commit", "date", 0)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	service := NewMonitorService(NewInMemoryMonitorRepositoryFromStore(store), NewChecker(http.DefaultClient, cfg, metrics), metrics, nil, logger)
+	handler := NewAPIHandler(service, "secret", logger)
+
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp := apiRequest(t, server.URL+"/api/v1/monitors", http.MethodGet, "")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status without key = %d, want 401", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/monitors", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-API-Key", "secret")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status with key = %d, want 200", resp.StatusCode)
 	}
 }
 
