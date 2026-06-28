@@ -9,11 +9,12 @@ FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
 WORKDIR /src
 
 # Кешуємо модульний граф окремо від вихідного коду.
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download
 
 COPY *.go ./
 COPY api/openapi.yaml ./api/openapi.yaml
+COPY migrations/*.sql ./migrations/
 
 ARG VERSION=dev
 ARG COMMIT=none

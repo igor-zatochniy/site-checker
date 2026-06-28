@@ -1,0 +1,83 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: site_checker
+      POSTGRES_USER: site_checker
+      POSTGRES_PASSWORD: site_checker
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U site_checker -d site_checker"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: site_checker
+      RABBITMQ_DEFAULT_PASS: site_checker
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  api:
+    build: .
+    environment:
+      APP_ROLE: api
+      STORAGE_TYPE: postgres
+      DATABASE_URL: postgres://site_checker:site_checker@postgres:5432/site_checker?sslmode=disable
+      QUEUE_TYPE: rabbitmq
+      RABBITMQ_URL: amqp://site_checker:site_checker@rabbitmq:5672/
+      API_KEY: change-me
+      HEALTH_ADDR: :8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  scheduler:
+    build: .
+    environment:
+      APP_ROLE: scheduler
+      STORAGE_TYPE: postgres
+      DATABASE_URL: postgres://site_checker:site_checker@postgres:5432/site_checker?sslmode=disable
+      QUEUE_TYPE: rabbitmq
+      RABBITMQ_URL: amqp://site_checker:site_checker@rabbitmq:5672/
+      HEALTH_ADDR: :8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  worker:
+    build: .
+    environment:
+      APP_ROLE: worker
+      STORAGE_TYPE: postgres
+      DATABASE_URL: postgres://site_checker:site_checker@postgres:5432/site_checker?sslmode=disable
+      QUEUE_TYPE: rabbitmq
+      RABBITMQ_URL: amqp://site_checker:site_checker@rabbitmq:5672/
+      WORKER_COUNT: "5"
+      HEALTH_ADDR: :8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
