@@ -6,7 +6,17 @@ metadata:
   labels:
     app.kubernetes.io/name: site-checker
 data:
+  STORAGE_TYPE: "postgres"
+  RUN_MIGRATIONS: "true"
+  QUEUE_TYPE: "rabbitmq"
+  QUEUE_NAME: "site_checker.checks"
+  DEAD_LETTER_QUEUE_NAME: "site_checker.checks.dead"
+  QUEUE_BUFFER_SIZE: "1000"
+  QUEUE_PREFETCH: "10"
+  MAX_JOB_ATTEMPTS: "3"
   WORKER_COUNT: "10"
+  SCHEDULER_BATCH_SIZE: "100"
+  CHECK_LEASE_TIMEOUT: "2m"
   CHECK_INTERVAL: "5m"
   HTTP_TIMEOUT: "5s"
   HEALTH_ADDR: ":8080"
