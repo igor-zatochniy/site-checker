@@ -33,6 +33,7 @@ services:
   api:
     build: .
     environment:
+      APP_ENV: production
       APP_ROLE: api
       STORAGE_TYPE: postgres
       DATABASE_URL: postgres://site_checker:site_checker@postgres:5432/site_checker?sslmode=disable
@@ -51,11 +52,14 @@ services:
   scheduler:
     build: .
     environment:
+      APP_ENV: production
       APP_ROLE: scheduler
       STORAGE_TYPE: postgres
       DATABASE_URL: postgres://site_checker:site_checker@postgres:5432/site_checker?sslmode=disable
       QUEUE_TYPE: rabbitmq
       RABBITMQ_URL: amqp://site_checker:site_checker@rabbitmq:5672/
+      SEED_DEFAULT_LINKS: "false"
+      SEED_URLS_FILE: ""
       HEALTH_ADDR: :8080
     depends_on:
       postgres:
@@ -66,6 +70,7 @@ services:
   worker:
     build: .
     environment:
+      APP_ENV: production
       APP_ROLE: worker
       STORAGE_TYPE: postgres
       DATABASE_URL: postgres://site_checker:site_checker@postgres:5432/site_checker?sslmode=disable

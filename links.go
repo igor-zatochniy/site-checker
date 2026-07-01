@@ -10,6 +10,9 @@ import (
 
 func LoadLinks(path string, fallback []string) ([]string, error) {
 	if strings.TrimSpace(path) == "" {
+		if len(fallback) == 0 {
+			return []string{}, nil
+		}
 		return normalizeLinks(fallback)
 	}
 
@@ -39,6 +42,14 @@ func LoadLinks(path string, fallback []string) ([]string, error) {
 	}
 
 	return normalizeLinks(links)
+}
+
+func LoadSeedLinks(cfg Config) ([]string, error) {
+	var fallback []string
+	if cfg.SeedDefaultLinks {
+		fallback = DefaultLinks()
+	}
+	return LoadLinks(cfg.SeedURLsFile, fallback)
 }
 
 func ValidateLinks(links []string, policy *NetworkPolicy) error {

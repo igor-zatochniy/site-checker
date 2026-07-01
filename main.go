@@ -34,31 +34,41 @@ func main() {
 		}
 	}
 
-	links, err := LoadLinks(cfg.URLsFile, DefaultLinks())
-	if err != nil {
-		logger.Error("Failed to load links", "error", err)
-		os.Exit(1)
-	}
-	if err := ValidateLinks(links, policy); err != nil {
-		logger.Error("Invalid link configuration", "error", err)
-		os.Exit(1)
-	}
-
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 	ctx, cancel := context.WithCancel(signalCtx)
 	defer cancel()
 
-	metrics := NewMetrics(version, commit, buildDate, len(links))
+	seedLinks := []string{}
+	if roleEnabled(cfg.AppRole, "scheduler") {
+		seedLinks, err = LoadSeedLinks(cfg)
+		if err != nil {
+			logger.Error("Failed to load seed links", "error", err)
+			os.Exit(1)
+		}
+		if len(seedLinks) > 0 {
+			if err := ValidateLinks(seedLinks, policy); err != nil {
+				logger.Error("Invalid seed link configuration", "error", err)
+				os.Exit(1)
+			}
+		}
+	}
+
+	metrics := NewMetrics(version, commit, buildDate, 0)
 	repo, closeRepo, err := NewConfiguredRepository(ctx, cfg, policy, logger)
 	if err != nil {
 		logger.Error("Failed to initialize repository", "error", err)
 		os.Exit(1)
 	}
 	defer closeRepo()
-	if err := SeedRepository(ctx, repo, links, cfg); err != nil {
-		logger.Error("Failed to seed monitors", "error", err)
-		os.Exit(1)
+	if len(seedLinks) > 0 {
+		if err := SeedRepository(ctx, repo, seedLinks, cfg); err != nil {
+			logger.Error("Failed to seed monitors", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("Seeded configured monitors", "count", len(seedLinks))
+	} else if roleEnabled(cfg.AppRole, "scheduler") {
+		logger.Info("No seed URLs configured")
 	}
 
 	checkClient := &http.Client{
@@ -102,7 +112,7 @@ func main() {
 		"workers", cfg.WorkerCount,
 		"interval", cfg.CheckInterval,
 		"timeout", cfg.HTTPTimeout,
-		"links", len(links),
+		"seed_links", len(seedLinks),
 		"health_addr", cfg.HealthAddr,
 		"pprof_enabled", cfg.EnablePprof,
 	)

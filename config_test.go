@@ -7,6 +7,7 @@ import (
 )
 
 var configEnvKeys = []string{
+	"APP_ENV",
 	"APP_ROLE",
 	"STORAGE_TYPE",
 	"DATABASE_URL",
@@ -32,6 +33,8 @@ var configEnvKeys = []string{
 	"ALLOW_PROXY_ENV",
 	"ALLOWED_PORTS",
 	"URLS_FILE",
+	"SEED_URLS_FILE",
+	"SEED_DEFAULT_LINKS",
 	"EXPECTED_STATUS",
 	"ALERT_WEBHOOK_URL",
 	"ALERT_FAILURE_THRESHOLD",
@@ -72,6 +75,15 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if cfg.AppRole != "all" {
 		t.Fatalf("AppRole = %q, want all", cfg.AppRole)
+	}
+	if cfg.AppEnv != "production" {
+		t.Fatalf("AppEnv = %q, want production", cfg.AppEnv)
+	}
+	if cfg.SeedDefaultLinks {
+		t.Fatal("SeedDefaultLinks = true, want false")
+	}
+	if cfg.SeedURLsFile != "" {
+		t.Fatalf("SeedURLsFile = %q, want empty", cfg.SeedURLsFile)
 	}
 	if cfg.StorageType != "memory" {
 		t.Fatalf("StorageType = %q, want memory", cfg.StorageType)
@@ -117,6 +129,8 @@ func TestLoadConfigAcceptsOverrides(t *testing.T) {
 	t.Setenv("EXPECTED_STATUS", "200-204,301")
 	t.Setenv("ALLOWED_PORTS", "80,443,8443")
 	t.Setenv("APP_ROLE", "worker")
+	t.Setenv("APP_ENV", "demo")
+	t.Setenv("SEED_URLS_FILE", "seed.txt")
 	t.Setenv("DATABASE_URL", "postgres://user:pass@example.com:5432/site_checker")
 	t.Setenv("RABBITMQ_URL", "amqp://guest:guest@example.com:5672/")
 	t.Setenv("QUEUE_PREFETCH", "7")
@@ -130,6 +144,15 @@ func TestLoadConfigAcceptsOverrides(t *testing.T) {
 	}
 	if cfg.AppRole != "worker" {
 		t.Fatalf("AppRole = %q, want worker", cfg.AppRole)
+	}
+	if cfg.AppEnv != "demo" {
+		t.Fatalf("AppEnv = %q, want demo", cfg.AppEnv)
+	}
+	if !cfg.SeedDefaultLinks {
+		t.Fatal("SeedDefaultLinks = false, want true for APP_ENV=demo")
+	}
+	if cfg.SeedURLsFile != "seed.txt" {
+		t.Fatalf("SeedURLsFile = %q, want seed.txt", cfg.SeedURLsFile)
 	}
 	if cfg.StorageType != "postgres" {
 		t.Fatalf("StorageType = %q, want postgres", cfg.StorageType)

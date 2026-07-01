@@ -6,6 +6,7 @@ metadata:
   labels:
     app.kubernetes.io/name: site-checker
 data:
+  APP_ENV: "production"
   STORAGE_TYPE: "postgres"
   RUN_MIGRATIONS: "true"
   QUEUE_TYPE: "rabbitmq"
@@ -31,3 +32,5 @@ data:
   ALERT_COOLDOWN: "10m"
   ENABLE_PPROF: "false"
   USER_AGENT: "site-checker"
+  SEED_DEFAULT_LINKS: "false"
+  SEED_URLS_FILE: ""
