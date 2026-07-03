@@ -15,6 +15,7 @@ type MonitorRepository interface {
 	Update(ctx context.Context, id string, patch MonitorPatch) (Monitor, error)
 	Delete(ctx context.Context, id string) error
 	ClaimDue(ctx context.Context, limit int, now time.Time, leaseTimeout time.Duration) ([]Monitor, error)
+	MarkProcessing(ctx context.Context, id, jobID string, now time.Time, leaseTimeout time.Duration) error
 	AddCheck(ctx context.Context, record CheckRecord) (Monitor, error)
 	CompleteWithoutRecord(ctx context.Context, id string) error
 	ListChecks(ctx context.Context, id string, offset, limit int) ([]CheckRecord, int, error)
@@ -65,6 +66,10 @@ func (r *InMemoryMonitorRepository) Delete(_ context.Context, id string) error {
 
 func (r *InMemoryMonitorRepository) ClaimDue(_ context.Context, limit int, now time.Time, leaseTimeout time.Duration) ([]Monitor, error) {
 	return r.store.ClaimDueWithLease(limit, now, leaseTimeout), nil
+}
+
+func (r *InMemoryMonitorRepository) MarkProcessing(_ context.Context, id, jobID string, now time.Time, leaseTimeout time.Duration) error {
+	return r.store.MarkProcessing(id, jobID, now, leaseTimeout)
 }
 
 func (r *InMemoryMonitorRepository) AddCheck(_ context.Context, record CheckRecord) (Monitor, error) {

@@ -74,6 +74,10 @@ func (s *MonitorService) ClaimDue(ctx context.Context, limit int, now time.Time,
 	return s.repo.ClaimDue(ctx, limit, now, leaseTimeout)
 }
 
+func (s *MonitorService) MarkProcessing(ctx context.Context, id, jobID string, now time.Time, leaseTimeout time.Duration) error {
+	return s.repo.MarkProcessing(ctx, id, jobID, now, leaseTimeout)
+}
+
 func (s *MonitorService) CompleteWithoutRecord(ctx context.Context, id string) error {
 	return s.repo.CompleteWithoutRecord(ctx, id)
 }

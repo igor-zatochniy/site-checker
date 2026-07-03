@@ -65,6 +65,10 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if len(claimed) != 1 || claimed[0].ID != monitor.ID {
 		t.Fatalf("claimed = %+v, want created monitor", claimed)
 	}
+	jobID := NewCheckJobID(monitor.ID, monitor.NextCheckAt)
+	if err := repo.MarkProcessing(ctx, monitor.ID, jobID, now.Add(10*time.Second), time.Minute); err != nil {
+		t.Fatal(err)
+	}
 
 	secondClaim, err := repo.ClaimDue(ctx, 10, now.Add(30*time.Second), time.Minute)
 	if err != nil {
@@ -72,6 +76,9 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	}
 	if len(secondClaim) != 0 {
 		t.Fatalf("second claim len = %d, want 0 before lease timeout", len(secondClaim))
+	}
+	if err := repo.MarkProcessing(ctx, monitor.ID, jobID, now.Add(30*time.Second), time.Minute); !errors.Is(err, ErrJobAlreadyProcessing) {
+		t.Fatalf("second MarkProcessing error = %v, want ErrJobAlreadyProcessing", err)
 	}
 
 	reclaimed, err := repo.ClaimDue(ctx, 10, now.Add(2*time.Minute), time.Minute)
@@ -81,10 +88,13 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if len(reclaimed) != 1 || reclaimed[0].ID != monitor.ID {
 		t.Fatalf("reclaimed = %+v, want stale pending monitor", reclaimed)
 	}
+	if err := repo.MarkProcessing(ctx, monitor.ID, jobID, now.Add(2*time.Minute), time.Minute); err != nil {
+		t.Fatal(err)
+	}
 
 	record := CheckRecord{
 		ID:         newID("chk"),
-		JobID:      NewCheckJobID(monitor.ID, monitor.NextCheckAt),
+		JobID:      jobID,
 		MonitorID:  monitor.ID,
 		StatusCode: 500,
 		LatencyMS:  42,

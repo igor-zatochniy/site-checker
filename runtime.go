@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -119,8 +120,8 @@ func enqueueDueMonitorJobs(ctx context.Context, service *MonitorService, queue J
 	}
 }
 
-func RunQueueWorkers(ctx context.Context, service *MonitorService, queue JobQueue, workerCount int, logger *slog.Logger) error {
-	deliveries, err := queue.Consume(ctx)
+func RunQueueWorkers(ctx context.Context, service *MonitorService, queue JobQueue, workerCount int, leaseTimeout time.Duration, logger *slog.Logger) error {
+	deliveries, consumerErrors, err := queue.Consume(ctx)
 	if err != nil {
 		return err
 	}
@@ -130,17 +131,37 @@ func RunQueueWorkers(ctx context.Context, service *MonitorService, queue JobQueu
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			runQueueWorker(ctx, workerID, service, deliveries, logger)
+			runQueueWorker(ctx, workerID, service, deliveries, leaseTimeout, logger)
 		}(workerID)
 	}
 
-	<-ctx.Done()
-	wg.Wait()
-	logger.Info("Workers stopped")
-	return nil
+	workersDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(workersDone)
+	}()
+
+	select {
+	case <-ctx.Done():
+		<-workersDone
+		logger.Info("Workers stopped")
+		return nil
+	case err := <-consumerErrors:
+		<-workersDone
+		if err == nil {
+			err = ErrQueueConsumerClosed
+		}
+		return fmt.Errorf("queue consumer stopped: %w", err)
+	case <-workersDone:
+		if ctx.Err() == nil {
+			return errors.New("all queue workers stopped unexpectedly")
+		}
+		logger.Info("Workers stopped")
+		return nil
+	}
 }
 
-func runQueueWorker(ctx context.Context, workerID int, service *MonitorService, deliveries <-chan QueueDelivery, logger *slog.Logger) {
+func runQueueWorker(ctx context.Context, workerID int, service *MonitorService, deliveries <-chan QueueDelivery, leaseTimeout time.Duration, logger *slog.Logger) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -149,12 +170,12 @@ func runQueueWorker(ctx context.Context, workerID int, service *MonitorService, 
 			if !ok {
 				return
 			}
-			handleQueueDelivery(ctx, workerID, service, delivery, logger)
+			handleQueueDelivery(ctx, workerID, service, delivery, leaseTimeout, logger)
 		}
 	}
 }
 
-func handleQueueDelivery(ctx context.Context, workerID int, service *MonitorService, delivery QueueDelivery, logger *slog.Logger) {
+func handleQueueDelivery(ctx context.Context, workerID int, service *MonitorService, delivery QueueDelivery, leaseTimeout time.Duration, logger *slog.Logger) {
 	monitor, err := service.Get(ctx, delivery.Job.MonitorID)
 	if err != nil {
 		if errors.Is(err, ErrMonitorNotFound) {
@@ -163,6 +184,19 @@ func handleQueueDelivery(ctx context.Context, workerID int, service *MonitorServ
 		}
 		if nackErr := delivery.Nack(ctx, true); nackErr != nil {
 			logger.Warn("Failed to nack job after monitor lookup error", "worker", workerID, "job_id", delivery.Job.JobID, "error", nackErr)
+		}
+		return
+	}
+
+	if err := service.MarkProcessing(ctx, delivery.Job.MonitorID, delivery.Job.JobID, time.Now().UTC(), leaseTimeout); err != nil {
+		if errors.Is(err, ErrStaleJob) || errors.Is(err, ErrJobAlreadyProcessing) || errors.Is(err, ErrMonitorNotFound) {
+			if ackErr := delivery.Ack(ctx); ackErr != nil {
+				logger.Warn("Failed to ack inactive job", "worker", workerID, "job_id", delivery.Job.JobID, "error", ackErr)
+			}
+			return
+		}
+		if nackErr := delivery.Nack(ctx, true); nackErr != nil {
+			logger.Warn("Failed to nack job after processing mark error", "worker", workerID, "job_id", delivery.Job.JobID, "error", nackErr)
 		}
 		return
 	}

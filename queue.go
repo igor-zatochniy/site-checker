@@ -11,7 +11,10 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-var ErrQueueFull = errors.New("job queue is full")
+var (
+	ErrQueueFull           = errors.New("job queue is full")
+	ErrQueueConsumerClosed = errors.New("queue consumer closed unexpectedly")
+)
 
 type CheckJobMessage struct {
 	JobID      string    `json:"job_id"`
@@ -29,7 +32,7 @@ type QueueDelivery struct {
 type JobQueue interface {
 	Ping(ctx context.Context) error
 	Publish(ctx context.Context, job CheckJobMessage) error
-	Consume(ctx context.Context) (<-chan QueueDelivery, error)
+	Consume(ctx context.Context) (<-chan QueueDelivery, <-chan error, error)
 	Close() error
 }
 
@@ -85,8 +88,9 @@ func (q *InMemoryQueue) Publish(ctx context.Context, job CheckJobMessage) error 
 	return nil
 }
 
-func (q *InMemoryQueue) Consume(ctx context.Context) (<-chan QueueDelivery, error) {
+func (q *InMemoryQueue) Consume(ctx context.Context) (<-chan QueueDelivery, <-chan error, error) {
 	deliveries := make(chan QueueDelivery)
+	consumerErrors := make(chan error, 1)
 	go func() {
 		defer close(deliveries)
 		for {
@@ -95,20 +99,29 @@ func (q *InMemoryQueue) Consume(ctx context.Context) (<-chan QueueDelivery, erro
 				return
 			case job, ok := <-q.jobs:
 				if !ok {
+					if ctx.Err() == nil {
+						consumerErrors <- ErrQueueConsumerClosed
+					}
 					return
 				}
 				delivery := QueueDelivery{
 					Job: job,
 				}
 				delivery.Ack = func(context.Context) error {
+					q.forget(job.JobID)
 					return nil
 				}
 				delivery.Nack = func(ctx context.Context, requeue bool) error {
 					if requeue && job.Attempt < q.maxAttempts {
 						next := job
 						next.Attempt++
-						return q.enqueue(ctx, next)
+						if err := q.enqueue(ctx, next); err != nil {
+							q.forget(job.JobID)
+							return err
+						}
+						return nil
 					}
+					defer q.forget(job.JobID)
 					select {
 					case q.deadLetters <- job:
 					default:
@@ -123,7 +136,7 @@ func (q *InMemoryQueue) Consume(ctx context.Context) (<-chan QueueDelivery, erro
 			}
 		}
 	}()
-	return deliveries, nil
+	return deliveries, consumerErrors, nil
 }
 
 func (q *InMemoryQueue) Close() error {
@@ -134,6 +147,12 @@ func (q *InMemoryQueue) Close() error {
 		close(q.jobs)
 	}
 	return nil
+}
+
+func (q *InMemoryQueue) forget(jobID string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.seen, jobID)
 }
 
 func (q *InMemoryQueue) enqueue(ctx context.Context, job CheckJobMessage) error {
@@ -248,21 +267,43 @@ func (q *RabbitMQQueue) Publish(ctx context.Context, job CheckJobMessage) error 
 	})
 }
 
-func (q *RabbitMQQueue) Consume(ctx context.Context) (<-chan QueueDelivery, error) {
+func (q *RabbitMQQueue) Consume(ctx context.Context) (<-chan QueueDelivery, <-chan error, error) {
+	q.mu.Lock()
+	channelClosed := q.channel.NotifyClose(make(chan *amqp.Error, 1))
 	rawDeliveries, err := q.channel.Consume(q.queueName, "", false, false, false, false, nil)
+	q.mu.Unlock()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	deliveries := make(chan QueueDelivery)
+	consumerErrors := make(chan error, 1)
+	reportConsumerError := func(err error) {
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case consumerErrors <- err:
+		default:
+		}
+	}
+
 	go func() {
 		defer close(deliveries)
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case closeErr := <-channelClosed:
+				if closeErr != nil {
+					reportConsumerError(fmt.Errorf("rabbitmq channel closed: %w", closeErr))
+					return
+				}
+				reportConsumerError(ErrQueueConsumerClosed)
+				return
 			case delivery, ok := <-rawDeliveries:
 				if !ok {
+					reportConsumerError(ErrQueueConsumerClosed)
 					return
 				}
 				msg := delivery
@@ -298,7 +339,7 @@ func (q *RabbitMQQueue) Consume(ctx context.Context) (<-chan QueueDelivery, erro
 			}
 		}
 	}()
-	return deliveries, nil
+	return deliveries, consumerErrors, nil
 }
 
 func (q *RabbitMQQueue) Close() error {

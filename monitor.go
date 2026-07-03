@@ -12,9 +12,11 @@ import (
 )
 
 var (
-	ErrMonitorNotFound = errors.New("monitor not found")
-	ErrMonitorExists   = errors.New("monitor already exists")
-	ErrDuplicateJob    = errors.New("check job already processed")
+	ErrMonitorNotFound      = errors.New("monitor not found")
+	ErrMonitorExists        = errors.New("monitor already exists")
+	ErrDuplicateJob         = errors.New("check job already processed")
+	ErrStaleJob             = errors.New("check job is no longer active")
+	ErrJobAlreadyProcessing = errors.New("check job is already processing")
 )
 
 const (
@@ -23,6 +25,7 @@ const (
 	incidentStatusOpen     = "open"
 	incidentStatusResolved = "resolved"
 	maxChecksPerMonitor    = 500
+	maxProcessedJobIDs     = 10_000
 )
 
 type Monitor struct {
@@ -100,10 +103,18 @@ type MonitorStore struct {
 	byID                  map[string]Monitor
 	byURL                 map[string]string
 	checks                map[string][]CheckRecord
-	pending               map[string]time.Time
+	pending               map[string]pendingState
 	incidents             map[string]Incident
 	openIncidentByMonitor map[string]string
 	processedJobs         map[string]struct{}
+	processedJobOrder     []string
+	processedJobHead      int
+}
+
+type pendingState struct {
+	jobID           string
+	queuedAt        time.Time
+	processingSince time.Time
 }
 
 func NewMonitorStore(policy *NetworkPolicy) *MonitorStore {
@@ -112,10 +123,11 @@ func NewMonitorStore(policy *NetworkPolicy) *MonitorStore {
 		byID:                  make(map[string]Monitor),
 		byURL:                 make(map[string]string),
 		checks:                make(map[string][]CheckRecord),
-		pending:               make(map[string]time.Time),
+		pending:               make(map[string]pendingState),
 		incidents:             make(map[string]Incident),
 		openIncidentByMonitor: make(map[string]string),
 		processedJobs:         make(map[string]struct{}),
+		processedJobOrder:     make([]string, 0, maxProcessedJobIDs),
 	}
 }
 
@@ -314,16 +326,49 @@ func (s *MonitorStore) ClaimDueWithLease(limit int, now time.Time, leaseTimeout 
 		if !monitor.Enabled || monitor.NextCheckAt.After(now) {
 			continue
 		}
-		if pendingSince, exists := s.pending[id]; exists {
-			if leaseTimeout <= 0 || now.Sub(pendingSince) < leaseTimeout {
+		if state, exists := s.pending[id]; exists {
+			leaseStartedAt := state.processingSince
+			if leaseStartedAt.IsZero() {
+				leaseStartedAt = state.queuedAt
+			}
+			if leaseTimeout <= 0 || now.Sub(leaseStartedAt) < leaseTimeout {
 				continue
 			}
 		}
 
-		s.pending[id] = now
+		s.pending[id] = pendingState{
+			jobID:    NewCheckJobID(id, monitor.NextCheckAt),
+			queuedAt: now.UTC(),
+		}
 		due = append(due, monitor)
 	}
 	return due
+}
+
+func (s *MonitorStore) MarkProcessing(id, jobID string, now time.Time, leaseTimeout time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.byID[id]; !exists {
+		return ErrMonitorNotFound
+	}
+
+	state, exists := s.pending[id]
+	if !exists || state.jobID != jobID {
+		return ErrStaleJob
+	}
+	if !state.processingSince.IsZero() {
+		if leaseTimeout <= 0 || now.Sub(state.processingSince) < leaseTimeout {
+			return ErrJobAlreadyProcessing
+		}
+	}
+
+	state.processingSince = now.UTC()
+	if state.queuedAt.IsZero() {
+		state.queuedAt = now.UTC()
+	}
+	s.pending[id] = state
+	return nil
 }
 
 func (s *MonitorStore) AddCheck(record CheckRecord) (Monitor, error) {
@@ -336,14 +381,14 @@ func (s *MonitorStore) AddCheck(record CheckRecord) (Monitor, error) {
 	}
 	if record.JobID != "" {
 		if _, exists := s.processedJobs[record.JobID]; exists {
-			delete(s.pending, record.MonitorID)
+			s.completePendingJobLocked(record.MonitorID, record.JobID)
 			return monitor, ErrDuplicateJob
 		}
-		s.processedJobs[record.JobID] = struct{}{}
+		s.rememberProcessedJobLocked(record.JobID)
 	}
 
 	now := time.Now().UTC()
-	delete(s.pending, record.MonitorID)
+	s.completePendingJobLocked(record.MonitorID, record.JobID)
 	monitor.LastStatusCode = record.StatusCode
 	monitor.LastLatencyMS = record.LatencyMS
 	monitor.LastCheckedAt = record.CheckedAt
@@ -359,6 +404,35 @@ func (s *MonitorStore) AddCheck(record CheckRecord) (Monitor, error) {
 	s.checks[record.MonitorID] = records
 	s.updateIncident(record, now)
 	return monitor, nil
+}
+
+func (s *MonitorStore) rememberProcessedJobLocked(jobID string) {
+	if _, exists := s.processedJobs[jobID]; exists {
+		return
+	}
+	s.processedJobs[jobID] = struct{}{}
+	s.processedJobOrder = append(s.processedJobOrder, jobID)
+
+	for len(s.processedJobs) > maxProcessedJobIDs {
+		oldest := s.processedJobOrder[s.processedJobHead]
+		delete(s.processedJobs, oldest)
+		s.processedJobHead++
+	}
+	if s.processedJobHead > maxProcessedJobIDs && s.processedJobHead*2 >= len(s.processedJobOrder) {
+		s.processedJobOrder = append([]string(nil), s.processedJobOrder[s.processedJobHead:]...)
+		s.processedJobHead = 0
+	}
+}
+
+func (s *MonitorStore) completePendingJobLocked(monitorID, jobID string) {
+	if jobID == "" {
+		delete(s.pending, monitorID)
+		return
+	}
+	state, exists := s.pending[monitorID]
+	if exists && state.jobID == jobID {
+		delete(s.pending, monitorID)
+	}
 }
 
 func (s *MonitorStore) updateIncident(record CheckRecord, now time.Time) {

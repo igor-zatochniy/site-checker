@@ -129,7 +129,7 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := RunQueueWorkers(ctx, service, queue, cfg.WorkerCount, logger); err != nil && ctx.Err() == nil {
+			if err := RunQueueWorkers(ctx, service, queue, cfg.WorkerCount, cfg.CheckLeaseTimeout, logger); err != nil && ctx.Err() == nil {
 				logger.Error("Workers stopped unexpectedly", "error", err)
 				cancel()
 			}

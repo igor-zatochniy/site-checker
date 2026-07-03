@@ -169,7 +169,8 @@ func (r *PostgresMonitorRepository) Update(ctx context.Context, id string, patch
 			next_check_at = $8,
 			updated_at = $9,
 			pending = CASE WHEN $7 THEN pending ELSE false END,
-			pending_since = CASE WHEN $7 THEN pending_since ELSE NULL END
+			pending_since = CASE WHEN $7 THEN pending_since ELSE NULL END,
+			pending_job_id = CASE WHEN $7 THEN pending_job_id ELSE NULL END
 		WHERE id = $1
 		RETURNING id, url, interval_seconds, timeout_seconds, expected_status,
 			status, enabled, next_check_at, created_at, updated_at,
@@ -205,7 +206,8 @@ func (r *PostgresMonitorRepository) ClaimDue(ctx context.Context, limit int, now
 	}
 	defer tx.Rollback(ctx)
 
-	leaseCutoff := time.Time{}
+	leaseCutoff := now.UTC()
+	canReclaim := leaseTimeout > 0
 	if leaseTimeout > 0 {
 		leaseCutoff = now.UTC().Add(-leaseTimeout)
 	}
@@ -218,7 +220,14 @@ func (r *PostgresMonitorRepository) ClaimDue(ctx context.Context, limit int, now
 				AND next_check_at <= $2::timestamptz
 				AND (
 					pending = false
-					OR (pending_since IS NOT NULL AND pending_since < $3::timestamptz)
+					OR (
+						$4::boolean
+						AND pending = true
+						AND (
+							(pending_since IS NULL AND updated_at < $3::timestamptz)
+							OR (pending_since IS NOT NULL AND pending_since < $3::timestamptz)
+						)
+					)
 				)
 			ORDER BY next_check_at, id
 			FOR UPDATE SKIP LOCKED
@@ -226,14 +235,15 @@ func (r *PostgresMonitorRepository) ClaimDue(ctx context.Context, limit int, now
 		)
 		UPDATE monitors m
 		SET pending = true,
-			pending_since = $2::timestamptz,
+			pending_since = NULL,
+			pending_job_id = NULL,
 			updated_at = $2::timestamptz
 		FROM due
 		WHERE m.id = due.id
 		RETURNING m.id, m.url, m.interval_seconds, m.timeout_seconds, m.expected_status,
 			m.status, m.enabled, m.next_check_at, m.created_at, m.updated_at,
 			m.last_status_code, m.last_latency_ms, m.last_checked_at, m.last_error
-	`, limit, now.UTC(), leaseCutoff)
+	`, limit, now.UTC(), leaseCutoff, canReclaim)
 	if err != nil {
 		return nil, err
 	}
@@ -241,10 +251,68 @@ func (r *PostgresMonitorRepository) ClaimDue(ctx context.Context, limit int, now
 	if err != nil {
 		return nil, err
 	}
+	for _, monitor := range monitors {
+		if _, err := tx.Exec(ctx, `
+			UPDATE monitors
+			SET pending_job_id = $2
+			WHERE id = $1
+		`, monitor.ID, NewCheckJobID(monitor.ID, monitor.NextCheckAt)); err != nil {
+			return nil, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return monitors, nil
+}
+
+func (r *PostgresMonitorRepository) MarkProcessing(ctx context.Context, id, jobID string, now time.Time, leaseTimeout time.Duration) error {
+	leaseCutoff := now.UTC()
+	canReclaim := leaseTimeout > 0
+	if leaseTimeout > 0 {
+		leaseCutoff = now.UTC().Add(-leaseTimeout)
+	}
+
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE monitors
+		SET pending = true,
+			pending_since = $3::timestamptz,
+			updated_at = $3::timestamptz
+		WHERE id = $1
+			AND pending = true
+			AND pending_job_id = $2
+			AND (
+				pending_since IS NULL
+				OR ($5::boolean AND pending_since < $4::timestamptz)
+			)
+	`, id, jobID, now.UTC(), leaseCutoff, canReclaim)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+
+	var (
+		pending      bool
+		pendingJobID sql.NullString
+		pendingSince sql.NullTime
+	)
+	err = r.pool.QueryRow(ctx, `
+		SELECT pending, pending_job_id, pending_since
+		FROM monitors
+		WHERE id = $1
+	`, id).Scan(&pending, &pendingJobID, &pendingSince)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrMonitorNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if !pending || !pendingJobID.Valid || pendingJobID.String != jobID {
+		return ErrStaleJob
+	}
+	return ErrJobAlreadyProcessing
 }
 
 func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRecord) (Monitor, error) {
@@ -254,18 +322,22 @@ func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRe
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		INSERT INTO check_results (
 			id, job_id, monitor_id, status_code, latency_ms, error, success, checked_at
 		)
 		VALUES ($1, NULLIF($2, ''), $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (job_id) DO NOTHING
 	`, record.ID, record.JobID, record.MonitorID, record.StatusCode, record.LatencyMS,
 		record.Error, record.Success, record.CheckedAt.UTC())
-	if isUniqueViolation(err) {
-		return Monitor{}, ErrDuplicateJob
-	}
 	if err != nil {
 		return Monitor{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		if err := completePendingJob(ctx, tx, record.MonitorID, record.JobID); err != nil {
+			return Monitor{}, err
+		}
+		return Monitor{}, ErrDuplicateJob
 	}
 
 	monitor, err := scanMonitor(tx.QueryRow(ctx, `
@@ -277,14 +349,23 @@ func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRe
 			next_check_at = $4::timestamptz + (interval_seconds * interval '1 second'),
 			updated_at = $6::timestamptz,
 			pending = false,
-			pending_since = NULL
+			pending_since = NULL,
+			pending_job_id = NULL
 		WHERE id = $1
+			AND (NULLIF($7, '') IS NULL OR pending_job_id = $7)
 		RETURNING id, url, interval_seconds, timeout_seconds, expected_status,
 			status, enabled, next_check_at, created_at, updated_at,
 			last_status_code, last_latency_ms, last_checked_at, last_error
-	`, record.MonitorID, record.StatusCode, record.LatencyMS, record.CheckedAt.UTC(), record.Error, time.Now().UTC()))
+	`, record.MonitorID, record.StatusCode, record.LatencyMS, record.CheckedAt.UTC(), record.Error, time.Now().UTC(), record.JobID))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return Monitor{}, ErrMonitorNotFound
+		var monitorExists bool
+		if existsErr := tx.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM monitors WHERE id = $1)", record.MonitorID).Scan(&monitorExists); existsErr != nil {
+			return Monitor{}, existsErr
+		}
+		if !monitorExists {
+			return Monitor{}, ErrMonitorNotFound
+		}
+		return Monitor{}, ErrStaleJob
 	}
 	if err != nil {
 		return Monitor{}, err
@@ -303,9 +384,32 @@ func (r *PostgresMonitorRepository) CompleteWithoutRecord(ctx context.Context, i
 	_, err := r.pool.Exec(ctx, `
 		UPDATE monitors
 		SET pending = false,
-			pending_since = NULL
+			pending_since = NULL,
+			pending_job_id = NULL
 		WHERE id = $1
 	`, id)
+	return err
+}
+
+func completePendingJob(ctx context.Context, tx pgx.Tx, monitorID, jobID string) error {
+	if jobID == "" {
+		_, err := tx.Exec(ctx, `
+			UPDATE monitors
+			SET pending = false,
+				pending_since = NULL,
+				pending_job_id = NULL
+			WHERE id = $1
+		`, monitorID)
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+		UPDATE monitors
+		SET pending = false,
+			pending_since = NULL,
+			pending_job_id = NULL
+		WHERE id = $1
+			AND pending_job_id = $2
+	`, monitorID, jobID)
 	return err
 }
 
