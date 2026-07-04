@@ -1,5 +1,7 @@
 # Site Checker
 
+[![CI](https://github.com/igor-zatochniy/site-checker/actions/workflows/ci.yml/badge.svg)](https://github.com/igor-zatochniy/site-checker/actions/workflows/ci.yml)
+
 Site Checker is a backend monitoring platform written in Go. It manages website monitors through a REST API, schedules checks, processes jobs with workers, stores history in PostgreSQL, publishes check jobs through RabbitMQ, exposes Prometheus-style metrics, and protects outbound HTTP checks from SSRF.
 
 ## Technology
@@ -7,7 +9,7 @@ Site Checker is a backend monitoring platform written in Go. It manages website 
 - Go 1.26, `net/http`, `log/slog`, goroutines, channels, and `context.Context`.
 - PostgreSQL with `pgxpool`, embedded SQL migrations, monitor history, and incidents.
 - REST API with repository/service/handler separation and API key authentication.
-- OpenAPI contract in `api/openapi.yaml`.
+- OpenAPI contract in [`api/openapi.yaml`](api/openapi.yaml).
 - JobQueue abstraction with in-memory and RabbitMQ implementations.
 - RabbitMQ durable queue, dead-letter queue, ack/nack, retry, idempotent `job_id`, prefetch, and bounded in-memory backpressure.
 - Prometheus-compatible metrics on `/metrics`, health probes on `/healthz` and dependency-aware `/readyz`, optional pprof.
@@ -51,11 +53,8 @@ flowchart LR
 
 ## REST API
 
-OpenAPI contract:
-
-```text
-api/openapi.yaml
-```
+- [OpenAPI YAML](api/openapi.yaml)
+- [Interactive API docs](https://igor-zatochniy.github.io/site-checker/)
 
 The running service also exposes it at:
 
@@ -92,6 +91,8 @@ curl -sS -X POST http://localhost:8080/api/v1/monitors \
   -H "X-API-Key: change-me" \
   -d '{"url":"https://example.com","interval_seconds":60,"timeout_seconds":5,"expected_status":200}'
 ```
+
+More request and response examples are available in [`docs/demo.md`](docs/demo.md).
 
 ## Run Locally
 
@@ -241,6 +242,24 @@ Expected demonstration:
 - 3 workers: backlog stabilizes.
 - 6 workers: backlog disappears faster.
 
+## Engineering trade-offs
+
+- The service keeps one binary and selects behavior through `APP_ROLE`. This keeps deployment artifacts simple while still allowing API, Scheduler, and Worker roles to scale independently.
+- The repository and queue interfaces support both local in-memory mode and production PostgreSQL/RabbitMQ mode. In-memory mode is fast for development, but PostgreSQL and RabbitMQ are the durable path for multi-replica deployments.
+- Scheduler and worker coordination uses explicit job IDs, monitor pending state, stale lease recovery, and RabbitMQ ack/nack semantics. This avoids duplicate persisted results and prevents stale queued jobs from creating repeated external HTTP checks.
+- SSRF protection is implemented in application code and reinforced by Kubernetes NetworkPolicy. Application-level checks give portable behavior; network policy adds defense in depth in clusters.
+- Alerts are currently lightweight webhook notifications. Incident history is persisted, but a full alert outbox with retry and cross-replica cooldown is a later hardening step.
+- Built-in demo URLs are opt-in. Normal deployments start with an empty monitor set to avoid sending unintended traffic to third-party websites.
+
+## Known limitations
+
+- The in-memory repository and queue are intended for local development and tests, not durable production use.
+- RabbitMQ reconnect is fail-fast today: if the consumer channel stops unexpectedly, the worker process exits so an orchestrator can restart it. Automatic reconnect with exponential backoff is a future improvement.
+- Webhook alert delivery does not yet use a persisted outbox, so retry/cooldown behavior is best-effort in multi-worker deployments.
+- PostgreSQL and RabbitMQ Kubernetes manifests are suitable for local or demonstration clusters. Production deployments should use managed services or hardened StatefulSets with backups, persistence, TLS, monitoring, and secret rotation.
+- KEDA queue-based scaling requires the KEDA operator to be installed separately.
+- The project exposes Prometheus-format metrics, but alert rules and dashboards are intentionally left environment-specific.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -307,3 +326,7 @@ APP_ENV=demo go run .
 By default, Site Checker blocks private networks, loopback addresses, link-local ranges, metadata IPs such as `169.254.169.254`, unsupported schemes, userinfo in URLs, unexpected ports, unsafe redirects, and environment proxies. Enable overrides only for trusted internal deployments.
 
 Kubernetes `secret.yaml` contains local-demo placeholder values. Production deployments should use External Secrets Operator, SOPS, Sealed Secrets, or a managed secret store with rotation.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
