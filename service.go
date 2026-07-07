@@ -8,20 +8,20 @@ import (
 )
 
 type MonitorService struct {
-	repo    MonitorRepository
-	checker *Checker
-	metrics *Metrics
-	alerts  *AlertManager
-	logger  *slog.Logger
+	repo        MonitorRepository
+	checker     *Checker
+	metrics     *Metrics
+	alertPolicy AlertPolicy
+	logger      *slog.Logger
 }
 
-func NewMonitorService(repo MonitorRepository, checker *Checker, metrics *Metrics, alerts *AlertManager, logger *slog.Logger) *MonitorService {
+func NewMonitorService(repo MonitorRepository, checker *Checker, metrics *Metrics, alertPolicy AlertPolicy, logger *slog.Logger) *MonitorService {
 	return &MonitorService{
-		repo:    repo,
-		checker: checker,
-		metrics: metrics,
-		alerts:  alerts,
-		logger:  logger,
+		repo:        repo,
+		checker:     checker,
+		metrics:     metrics,
+		alertPolicy: alertPolicy,
+		logger:      logger,
 	}
 }
 
@@ -93,7 +93,6 @@ func (s *MonitorService) RunManualCheck(ctx context.Context, id string) (CheckRe
 
 	result := s.checker.CheckMonitor(checkCtx, monitor)
 	record := CheckRecordFromResult(result)
-	record.JobID = newID("manual")
 	if err := s.StoreCheckResult(ctx, record, result); err != nil {
 		return CheckRecord{}, err
 	}
@@ -101,7 +100,7 @@ func (s *MonitorService) RunManualCheck(ctx context.Context, id string) (CheckRe
 }
 
 func (s *MonitorService) StoreCheckResult(ctx context.Context, record CheckRecord, result CheckResult) error {
-	if _, err := s.repo.AddCheck(ctx, record); err != nil {
+	if _, err := s.repo.AddCheck(ctx, record, s.alertPolicy); err != nil {
 		if errors.Is(err, ErrDuplicateJob) {
 			return nil
 		}
@@ -109,9 +108,6 @@ func (s *MonitorService) StoreCheckResult(ctx context.Context, record CheckRecor
 	}
 
 	s.metrics.RecordResult(result)
-	if s.alerts != nil {
-		s.alerts.Handle(ctx, result)
-	}
 	return nil
 }
 

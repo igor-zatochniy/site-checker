@@ -15,6 +15,9 @@ var configEnvKeys = []string{
 	"API_KEY",
 	"QUEUE_TYPE",
 	"RABBITMQ_URL",
+	"RABBITMQ_CONNECT_TIMEOUT",
+	"RABBITMQ_RECONNECT_INITIAL_BACKOFF",
+	"RABBITMQ_RECONNECT_MAX_BACKOFF",
 	"QUEUE_NAME",
 	"DEAD_LETTER_QUEUE_NAME",
 	"QUEUE_BUFFER_SIZE",
@@ -39,6 +42,13 @@ var configEnvKeys = []string{
 	"ALERT_WEBHOOK_URL",
 	"ALERT_FAILURE_THRESHOLD",
 	"ALERT_COOLDOWN",
+	"ALERT_DISPATCH_INTERVAL",
+	"ALERT_DISPATCH_BATCH_SIZE",
+	"ALERT_LEASE_TIMEOUT",
+	"ALERT_DELIVERY_TIMEOUT",
+	"ALERT_MAX_ATTEMPTS",
+	"ALERT_RETRY_INITIAL_BACKOFF",
+	"ALERT_RETRY_MAX_BACKOFF",
 	"USER_AGENT",
 	"ENABLE_PPROF",
 	"READINESS_STALE_AFTER",
@@ -91,17 +101,51 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.QueueType != "memory" {
 		t.Fatalf("QueueType = %q, want memory", cfg.QueueType)
 	}
+	if cfg.RabbitMQReconnectInitial != time.Second || cfg.RabbitMQReconnectMax != 30*time.Second {
+		t.Fatalf("RabbitMQ reconnect backoff = %s..%s, want 1s..30s", cfg.RabbitMQReconnectInitial, cfg.RabbitMQReconnectMax)
+	}
 	if cfg.CheckInterval != 5*time.Minute {
 		t.Fatalf("CheckInterval = %s, want 5m", cfg.CheckInterval)
 	}
 	if cfg.CheckLeaseTimeout != 2*time.Minute {
 		t.Fatalf("CheckLeaseTimeout = %s, want 2m", cfg.CheckLeaseTimeout)
 	}
+	if cfg.AlertMaxAttempts != 8 {
+		t.Fatalf("AlertMaxAttempts = %d, want 8", cfg.AlertMaxAttempts)
+	}
 	if _, ok := cfg.AllowedPorts[80]; !ok {
 		t.Fatalf("port 80 is not allowed by default")
 	}
 	if _, ok := cfg.AllowedPorts[443]; !ok {
 		t.Fatalf("port 443 is not allowed by default")
+	}
+}
+
+func TestLoadConfigAcceptsAlertDispatcherRole(t *testing.T) {
+	cleanConfigEnv(t)
+	t.Setenv("APP_ROLE", "alert-dispatcher")
+	t.Setenv("STORAGE_TYPE", "postgres")
+	t.Setenv("DATABASE_URL", "postgres://user:pass@example.com:5432/site_checker")
+	t.Setenv("ALERT_WEBHOOK_URL", "https://alerts.example.com/site-checker")
+	t.Setenv("ALERT_MAX_ATTEMPTS", "5")
+	t.Setenv("ALERT_RETRY_INITIAL_BACKOFF", "2s")
+	t.Setenv("ALERT_RETRY_MAX_BACKOFF", "2m")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.AppRole != "alert-dispatcher" || cfg.AlertMaxAttempts != 5 {
+		t.Fatalf("alert dispatcher config = role:%q attempts:%d", cfg.AppRole, cfg.AlertMaxAttempts)
+	}
+}
+
+func TestLoadConfigRequiresPostgresForAlerts(t *testing.T) {
+	cleanConfigEnv(t)
+	t.Setenv("ALERT_WEBHOOK_URL", "https://alerts.example.com/site-checker")
+
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig returned nil error for alerts with in-memory storage")
 	}
 }
 
@@ -134,6 +178,9 @@ func TestLoadConfigAcceptsOverrides(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://user:pass@example.com:5432/site_checker")
 	t.Setenv("RABBITMQ_URL", "amqp://guest:guest@example.com:5672/")
 	t.Setenv("QUEUE_PREFETCH", "7")
+	t.Setenv("RABBITMQ_CONNECT_TIMEOUT", "3s")
+	t.Setenv("RABBITMQ_RECONNECT_INITIAL_BACKOFF", "500ms")
+	t.Setenv("RABBITMQ_RECONNECT_MAX_BACKOFF", "10s")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -162,6 +209,9 @@ func TestLoadConfigAcceptsOverrides(t *testing.T) {
 	}
 	if cfg.QueuePrefetch != 7 {
 		t.Fatalf("QueuePrefetch = %d, want 7", cfg.QueuePrefetch)
+	}
+	if cfg.RabbitMQConnectTimeout != 3*time.Second || cfg.RabbitMQReconnectMax != 10*time.Second {
+		t.Fatalf("RabbitMQ reconnect config = timeout:%s max:%s", cfg.RabbitMQConnectTimeout, cfg.RabbitMQReconnectMax)
 	}
 	if cfg.CheckLeaseTimeout != 30*time.Second {
 		t.Fatalf("CheckLeaseTimeout = %s, want 30s", cfg.CheckLeaseTimeout)

@@ -76,17 +76,34 @@ func main() {
 		Timeout:       cfg.HTTPTimeout,
 		CheckRedirect: policy.CheckRedirect,
 	}
-	alertClient := &http.Client{
-		Transport:     NewSecureTransport(cfg, policy),
-		Timeout:       cfg.HTTPTimeout,
-		CheckRedirect: policy.CheckRedirect,
-	}
-
-	alerts := NewAlertManager(cfg.AlertWebhookURL, alertClient, metrics, logger, cfg.AlertFailureThreshold, cfg.AlertCooldown)
 	checker := NewChecker(checkClient, cfg, metrics)
-	service := NewMonitorService(repo, checker, metrics, alerts, logger)
+	alertPolicy := AlertPolicy{
+		Enabled:          cfg.AlertWebhookURL != "",
+		FailureThreshold: cfg.AlertFailureThreshold,
+		Cooldown:         cfg.AlertCooldown,
+	}
+	service := NewMonitorService(repo, checker, metrics, alertPolicy, logger)
 	service.updateTotalLinks(ctx)
 	api := NewAPIHandler(service, cfg.APIKey, logger)
+
+	var (
+		alertRepo   AlertOutboxRepository
+		alertSender *AlertSender
+	)
+	if roleEnabled(cfg.AppRole, "alert-dispatcher") && cfg.AlertWebhookURL != "" {
+		var ok bool
+		alertRepo, ok = repo.(AlertOutboxRepository)
+		if !ok {
+			logger.Error("Configured repository does not support persisted alert delivery")
+			os.Exit(1)
+		}
+		alertClient := &http.Client{
+			Transport:     NewSecureTransport(cfg, policy),
+			Timeout:       cfg.AlertDeliveryTimeout,
+			CheckRedirect: policy.CheckRedirect,
+		}
+		alertSender = NewAlertSender(cfg.AlertWebhookURL, cfg.UserAgent, alertClient)
+	}
 
 	var queue JobQueue
 	if roleEnabled(cfg.AppRole, "scheduler") || roleEnabled(cfg.AppRole, "worker") {
@@ -115,6 +132,7 @@ func main() {
 		"seed_links", len(seedLinks),
 		"health_addr", cfg.HealthAddr,
 		"pprof_enabled", cfg.EnablePprof,
+		"alerts_enabled", alertPolicy.Enabled,
 	)
 
 	var wg sync.WaitGroup
@@ -133,6 +151,13 @@ func main() {
 				logger.Error("Workers stopped unexpectedly", "error", err)
 				cancel()
 			}
+		}()
+	}
+	if alertRepo != nil && alertSender != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			RunAlertDispatcher(ctx, alertRepo, alertSender, cfg, metrics, logger)
 		}()
 	}
 

@@ -102,11 +102,57 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 		Success:    false,
 		CheckedAt:  time.Now().UTC(),
 	}
-	if _, err := repo.AddCheck(ctx, record); err != nil {
+	alertPolicy := AlertPolicy{Enabled: true, FailureThreshold: 1, Cooldown: time.Hour}
+	if _, err := repo.AddCheck(ctx, record, alertPolicy); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.AddCheck(ctx, record); !errors.Is(err, ErrDuplicateJob) {
+	if _, err := repo.AddCheck(ctx, record, alertPolicy); !errors.Is(err, ErrDuplicateJob) {
 		t.Fatalf("duplicate AddCheck error = %v, want ErrDuplicateJob", err)
+	}
+
+	alertNow := time.Now().UTC()
+	events, err := repo.ClaimAlerts(ctx, 10, alertNow, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("claimed alerts = %d, want 1", len(events))
+	}
+	event := events[0]
+	if event.AttemptCount != 1 || event.Payload.IncidentID == "" || event.Payload.ConsecutiveFailures != 1 {
+		t.Fatalf("alert event = %+v, want first incident failure", event)
+	}
+	events, err = repo.ClaimAlerts(ctx, 10, alertNow.Add(2*time.Minute), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].AttemptCount != 2 {
+		t.Fatalf("reclaimed alerts = %+v, want stale lease attempt 2", events)
+	}
+	if err := repo.MarkAlertDelivered(ctx, event.ID, event.LeaseToken, alertNow); !errors.Is(err, ErrStaleAlertLease) {
+		t.Fatalf("expired lease delivery error = %v, want ErrStaleAlertLease", err)
+	}
+	event = events[0]
+	retryAt := alertNow.Add(3 * time.Minute)
+	if err := repo.MarkAlertFailed(ctx, event.ID, event.LeaseToken, "temporary failure", retryAt, false); err != nil {
+		t.Fatal(err)
+	}
+	events, err = repo.ClaimAlerts(ctx, 10, alertNow.Add(150*time.Second), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("alerts before retry = %d, want 0", len(events))
+	}
+	events, err = repo.ClaimAlerts(ctx, 10, retryAt.Add(time.Second), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].AttemptCount != 3 {
+		t.Fatalf("retried alerts = %+v, want attempt 3", events)
+	}
+	if err := repo.MarkAlertDelivered(ctx, events[0].ID, events[0].LeaseToken, retryAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
 	}
 
 	checks, total, err := repo.ListChecks(ctx, monitor.ID, 0, 10)
@@ -126,12 +172,25 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	}
 
 	record.ID = newID("chk")
-	record.JobID = NewCheckJobID(monitor.ID, time.Now().UTC())
+	record.JobID = ""
+	record.CheckedAt = time.Now().UTC()
+	if _, err := repo.AddCheck(ctx, record, alertPolicy); err != nil {
+		t.Fatal(err)
+	}
+	events, err = repo.ClaimAlerts(ctx, 10, time.Now().UTC(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("alerts during cooldown = %d, want 0", len(events))
+	}
+
+	record.ID = newID("chk")
 	record.StatusCode = 200
 	record.Error = ""
 	record.Success = true
 	record.CheckedAt = time.Now().UTC()
-	if _, err := repo.AddCheck(ctx, record); err != nil {
+	if _, err := repo.AddCheck(ctx, record, alertPolicy); err != nil {
 		t.Fatal(err)
 	}
 
@@ -139,8 +198,8 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.ChecksTotal != 2 || stats.SuccessfulChecks != 1 || stats.FailedChecks != 1 {
-		t.Fatalf("stats = %+v, want one success and one failure", stats)
+	if stats.ChecksTotal != 3 || stats.SuccessfulChecks != 1 || stats.FailedChecks != 2 {
+		t.Fatalf("stats = %+v, want one success and two failures", stats)
 	}
 
 	incidents, total, err = repo.ListIncidents(ctx, incidentStatusOpen, 0, 10)

@@ -5,8 +5,12 @@ info:
   description: REST API for managing website availability monitors.
 servers:
   - url: http://localhost:8080
+security:
+  - ApiKeyAuth: []
+  - BearerAuth: []
 tags:
   - name: Monitors
+  - name: Incidents
 paths:
   /api/v1/monitors:
     get:
@@ -150,7 +154,36 @@ paths:
                 $ref: "#/components/schemas/MonitorStats"
         "404":
           $ref: "#/components/responses/NotFound"
+  /api/v1/incidents:
+    get:
+      tags: [Incidents]
+      summary: List incidents
+      operationId: listIncidents
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [open, resolved]
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Incident list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentListResponse"
 components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    BearerAuth:
+      type: http
+      scheme: bearer
   parameters:
     MonitorID:
       name: id
@@ -279,6 +312,8 @@ components:
       properties:
         id:
           type: string
+        job_id:
+          type: string
         monitor_id:
           type: string
         status_code:
@@ -290,6 +325,41 @@ components:
         success:
           type: boolean
         checked_at:
+          type: string
+          format: date-time
+    Incident:
+      type: object
+      required: [id, monitor_id, status, failure_count, first_failure_at, last_failure_at, alert_count, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        monitor_id:
+          type: string
+        status:
+          type: string
+          enum: [open, resolved]
+        failure_count:
+          type: integer
+        first_failure_at:
+          type: string
+          format: date-time
+        last_failure_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type: string
+          format: date-time
+        last_error:
+          type: string
+        last_alerted_at:
+          type: string
+          format: date-time
+        alert_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
           type: string
           format: date-time
     MonitorStats:
@@ -339,6 +409,20 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/CheckRecord"
+        total:
+          type: integer
+        offset:
+          type: integer
+        limit:
+          type: integer
+    IncidentListResponse:
+      type: object
+      required: [items, total, offset, limit]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Incident"
         total:
           type: integer
         offset:
