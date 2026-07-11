@@ -14,12 +14,15 @@ import (
 var (
 	ErrMonitorNotFound = errors.New("monitor not found")
 	ErrMonitorExists   = errors.New("monitor already exists")
+	ErrDuplicateJob    = errors.New("check job already processed")
 )
 
 const (
-	monitorStatusActive   = "active"
-	monitorStatusDisabled = "disabled"
-	maxChecksPerMonitor   = 500
+	monitorStatusActive    = "active"
+	monitorStatusDisabled  = "disabled"
+	incidentStatusOpen     = "open"
+	incidentStatusResolved = "resolved"
+	maxChecksPerMonitor    = 500
 )
 
 type Monitor struct {
@@ -41,12 +44,26 @@ type Monitor struct {
 
 type CheckRecord struct {
 	ID         string    `json:"id"`
+	JobID      string    `json:"job_id,omitempty"`
 	MonitorID  string    `json:"monitor_id"`
 	StatusCode int       `json:"status_code"`
 	LatencyMS  int64     `json:"latency_ms"`
 	Error      string    `json:"error,omitempty"`
 	Success    bool      `json:"success"`
 	CheckedAt  time.Time `json:"checked_at"`
+}
+
+type Incident struct {
+	ID             string    `json:"id"`
+	MonitorID      string    `json:"monitor_id"`
+	Status         string    `json:"status"`
+	FailureCount   int       `json:"failure_count"`
+	FirstFailureAt time.Time `json:"first_failure_at"`
+	LastFailureAt  time.Time `json:"last_failure_at"`
+	ResolvedAt     time.Time `json:"resolved_at,omitempty"`
+	LastError      string    `json:"last_error,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type MonitorStats struct {
@@ -78,21 +95,27 @@ type MonitorPatch struct {
 }
 
 type MonitorStore struct {
-	mu      sync.RWMutex
-	policy  *NetworkPolicy
-	byID    map[string]Monitor
-	byURL   map[string]string
-	checks  map[string][]CheckRecord
-	pending map[string]struct{}
+	mu                    sync.RWMutex
+	policy                *NetworkPolicy
+	byID                  map[string]Monitor
+	byURL                 map[string]string
+	checks                map[string][]CheckRecord
+	pending               map[string]time.Time
+	incidents             map[string]Incident
+	openIncidentByMonitor map[string]string
+	processedJobs         map[string]struct{}
 }
 
 func NewMonitorStore(policy *NetworkPolicy) *MonitorStore {
 	return &MonitorStore{
-		policy:  policy,
-		byID:    make(map[string]Monitor),
-		byURL:   make(map[string]string),
-		checks:  make(map[string][]CheckRecord),
-		pending: make(map[string]struct{}),
+		policy:                policy,
+		byID:                  make(map[string]Monitor),
+		byURL:                 make(map[string]string),
+		checks:                make(map[string][]CheckRecord),
+		pending:               make(map[string]time.Time),
+		incidents:             make(map[string]Incident),
+		openIncidentByMonitor: make(map[string]string),
+		processedJobs:         make(map[string]struct{}),
 	}
 }
 
@@ -266,10 +289,20 @@ func (s *MonitorStore) Delete(id string) error {
 	delete(s.byURL, monitor.URL)
 	delete(s.checks, id)
 	delete(s.pending, id)
+	delete(s.openIncidentByMonitor, id)
+	for incidentID, incident := range s.incidents {
+		if incident.MonitorID == id {
+			delete(s.incidents, incidentID)
+		}
+	}
 	return nil
 }
 
 func (s *MonitorStore) ClaimDue(limit int, now time.Time) []Monitor {
+	return s.ClaimDueWithLease(limit, now, 0)
+}
+
+func (s *MonitorStore) ClaimDueWithLease(limit int, now time.Time, leaseTimeout time.Duration) []Monitor {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -281,11 +314,13 @@ func (s *MonitorStore) ClaimDue(limit int, now time.Time) []Monitor {
 		if !monitor.Enabled || monitor.NextCheckAt.After(now) {
 			continue
 		}
-		if _, exists := s.pending[id]; exists {
-			continue
+		if pendingSince, exists := s.pending[id]; exists {
+			if leaseTimeout <= 0 || now.Sub(pendingSince) < leaseTimeout {
+				continue
+			}
 		}
 
-		s.pending[id] = struct{}{}
+		s.pending[id] = now
 		due = append(due, monitor)
 	}
 	return due
@@ -298,6 +333,13 @@ func (s *MonitorStore) AddCheck(record CheckRecord) (Monitor, error) {
 	monitor, exists := s.byID[record.MonitorID]
 	if !exists {
 		return Monitor{}, ErrMonitorNotFound
+	}
+	if record.JobID != "" {
+		if _, exists := s.processedJobs[record.JobID]; exists {
+			delete(s.pending, record.MonitorID)
+			return monitor, ErrDuplicateJob
+		}
+		s.processedJobs[record.JobID] = struct{}{}
 	}
 
 	now := time.Now().UTC()
@@ -315,7 +357,53 @@ func (s *MonitorStore) AddCheck(record CheckRecord) (Monitor, error) {
 		records = records[len(records)-maxChecksPerMonitor:]
 	}
 	s.checks[record.MonitorID] = records
+	s.updateIncident(record, now)
 	return monitor, nil
+}
+
+func (s *MonitorStore) updateIncident(record CheckRecord, now time.Time) {
+	if record.Success {
+		incidentID, exists := s.openIncidentByMonitor[record.MonitorID]
+		if !exists {
+			return
+		}
+		incident := s.incidents[incidentID]
+		incident.Status = incidentStatusResolved
+		incident.ResolvedAt = record.CheckedAt
+		incident.UpdatedAt = now
+		s.incidents[incidentID] = incident
+		delete(s.openIncidentByMonitor, record.MonitorID)
+		return
+	}
+
+	lastError := record.Error
+	if lastError == "" {
+		lastError = fmt.Sprintf("unexpected status code %d", record.StatusCode)
+	}
+
+	if incidentID, exists := s.openIncidentByMonitor[record.MonitorID]; exists {
+		incident := s.incidents[incidentID]
+		incident.FailureCount++
+		incident.LastFailureAt = record.CheckedAt
+		incident.LastError = lastError
+		incident.UpdatedAt = now
+		s.incidents[incidentID] = incident
+		return
+	}
+
+	incident := Incident{
+		ID:             newID("inc"),
+		MonitorID:      record.MonitorID,
+		Status:         incidentStatusOpen,
+		FailureCount:   1,
+		FirstFailureAt: record.CheckedAt,
+		LastFailureAt:  record.CheckedAt,
+		LastError:      lastError,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	s.incidents[incident.ID] = incident
+	s.openIncidentByMonitor[record.MonitorID] = incident.ID
 }
 
 func (s *MonitorStore) CompleteWithoutRecord(id string) {
@@ -348,6 +436,35 @@ func (s *MonitorStore) ListChecks(id string, offset, limit int) ([]CheckRecord, 
 	}
 	end := min(offset+limit, total)
 	return records[offset:end], total, nil
+}
+
+func (s *MonitorStore) ListIncidents(status string, offset, limit int) ([]Incident, int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	incidents := make([]Incident, 0, len(s.incidents))
+	for _, incident := range s.incidents {
+		if status != "" && incident.Status != status {
+			continue
+		}
+		incidents = append(incidents, incident)
+	}
+	slices.SortFunc(incidents, func(a, b Incident) int {
+		if a.CreatedAt.Equal(b.CreatedAt) {
+			return compareString(a.ID, b.ID)
+		}
+		if a.CreatedAt.After(b.CreatedAt) {
+			return -1
+		}
+		return 1
+	})
+
+	total := len(incidents)
+	if offset > total {
+		return []Incident{}, total
+	}
+	end := min(offset+limit, total)
+	return append([]Incident(nil), incidents[offset:end]...), total
 }
 
 func (s *MonitorStore) Stats(id string) (MonitorStats, error) {

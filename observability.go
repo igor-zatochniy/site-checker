@@ -1,13 +1,24 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/pprof"
 	"time"
 )
 
+type ReadinessDependency struct {
+	Name  string
+	Check func(ctx context.Context) error
+}
+
 func NewObservabilityServer(addr string, cfg Config, metrics *Metrics, registrars ...func(*http.ServeMux)) *http.Server {
+	return NewObservabilityServerWithDependencies(addr, cfg, metrics, nil, registrars...)
+}
+
+func NewObservabilityServerWithDependencies(addr string, cfg Config, metrics *Metrics, dependencies []ReadinessDependency, registrars ...func(*http.ServeMux)) *http.Server {
 	mux := http.NewServeMux()
 	for _, register := range registrars {
 		if register != nil {
@@ -24,6 +35,22 @@ func NewObservabilityServer(addr string, cfg Config, metrics *Metrics, registrar
 		})
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if dependencyErrors := checkReadinessDependencies(r.Context(), metrics, dependencies); len(dependencyErrors) > 0 {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"status":       "not_ready",
+				"dependencies": dependencyErrors,
+			})
+			return
+		}
+
+		if cfg.AppRole != "" && cfg.AppRole != "all" {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status": "ready",
+				"role":   cfg.AppRole,
+			})
+			return
+		}
+
 		snapshot := metrics.Snapshot()
 		now := time.Now()
 		if snapshot.LastCheckAt.IsZero() {
@@ -56,6 +83,31 @@ func NewObservabilityServer(addr string, cfg Config, metrics *Metrics, registrar
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    int(cfg.MaxHeaderBytes),
 	}
+}
+
+func checkReadinessDependencies(ctx context.Context, metrics *Metrics, dependencies []ReadinessDependency) map[string]string {
+	if len(dependencies) == 0 {
+		return nil
+	}
+
+	checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	failures := make(map[string]string)
+	for _, dependency := range dependencies {
+		if dependency.Name == "" || dependency.Check == nil {
+			continue
+		}
+		err := dependency.Check(checkCtx)
+		metrics.SetDependencyUp(dependency.Name, err == nil)
+		if err != nil {
+			failures[dependency.Name] = fmt.Sprintf("%v", err)
+		}
+	}
+	if len(failures) == 0 {
+		return nil
+	}
+	return failures
 }
 
 func registerPprof(mux *http.ServeMux) {

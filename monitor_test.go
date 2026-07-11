@@ -40,6 +40,38 @@ func TestMonitorStoreClaimDueAvoidsDuplicates(t *testing.T) {
 	}
 }
 
+func TestMonitorStoreReclaimsStalePendingMonitor(t *testing.T) {
+	cfg := testCheckerConfig(t)
+	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}
+	store := NewMonitorStore(NewNetworkPolicy(cfg))
+
+	monitor, err := store.Create(MonitorInput{
+		URL:             "https://example.com",
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	first := store.ClaimDueWithLease(10, now, time.Minute)
+	if len(first) != 1 || first[0].ID != monitor.ID {
+		t.Fatalf("first claim = %+v, want monitor %s", first, monitor.ID)
+	}
+
+	second := store.ClaimDueWithLease(10, now.Add(30*time.Second), time.Minute)
+	if len(second) != 0 {
+		t.Fatalf("second claim len = %d, want 0 before lease timeout", len(second))
+	}
+
+	third := store.ClaimDueWithLease(10, now.Add(2*time.Minute), time.Minute)
+	if len(third) != 1 || third[0].ID != monitor.ID {
+		t.Fatalf("third claim = %+v, want reclaimed monitor %s", third, monitor.ID)
+	}
+}
+
 func TestMonitorStoreStats(t *testing.T) {
 	cfg := testCheckerConfig(t)
 	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}

@@ -45,8 +45,12 @@ func (c *Checker) Check(ctx context.Context, job CheckJob) (result CheckResult) 
 		CheckedAt: startedAt,
 	}
 	defer func() {
-		result.Duration = time.Since(startedAt)
-		result.CheckedAt = time.Now()
+		duration := time.Since(startedAt)
+		if duration <= 0 {
+			duration = time.Nanosecond
+		}
+		result.Duration = duration
+		result.CheckedAt = time.Now().UTC()
 	}()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, job.URL, nil)

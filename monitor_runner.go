@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+// RunMonitorScheduler is the legacy in-memory monitor runner retained for
+// regression tests and development reference. Production runtime is split into
+// API, scheduler, and worker roles connected through JobQueue.
 func RunMonitorScheduler(
 	ctx context.Context,
 	store *MonitorStore,

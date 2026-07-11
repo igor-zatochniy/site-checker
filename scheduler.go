@@ -6,6 +6,9 @@ import (
 	"time"
 )
 
+// Scheduler is the legacy in-memory scheduler kept for focused unit tests and
+// historical comparison. Production runtime uses RunQueueScheduler with
+// PostgreSQL-backed claims and a JobQueue implementation.
 type Scheduler struct {
 	links        []string
 	jobs         chan<- CheckJob

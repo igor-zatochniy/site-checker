@@ -1,30 +1,53 @@
 # Site Checker
 
-Site Checker is a production-oriented Go service for monitoring website availability. It provides a REST API for managing monitors, runs background checks with a worker pool, exposes health and Prometheus-style metrics, protects outbound HTTP requests from SSRF-style abuse, and runs cleanly in Docker or Kubernetes.
+Site Checker is a backend monitoring platform written in Go. It manages website monitors through a REST API, schedules checks, processes jobs with workers, stores history in PostgreSQL, publishes check jobs through RabbitMQ, exposes Prometheus-style metrics, and protects outbound HTTP checks from SSRF.
 
 ## Technology
 
-- Go 1.26 with `net/http`, `log/slog`, goroutines, channels, and `context.Context`.
-- REST API with versioned `/api/v1` routes.
-- Contract-first API documentation in `api/openapi.yaml`.
-- Prometheus-compatible text metrics on `/metrics`.
-- Optional pprof endpoints on `/debug/pprof/`.
-- Docker multi-stage build with `golang:1.26.5-alpine3.24` and `alpine:3.24`.
-- GitHub Actions CI with tests, race detector, `go vet`, Staticcheck, govulncheck, and container build.
-- Kubernetes manifests with probes, resource limits, security context, rolling update, and graceful termination.
+- Go 1.26, `net/http`, `log/slog`, goroutines, channels, and `context.Context`.
+- PostgreSQL with `pgxpool`, embedded SQL migrations, monitor history, and incidents.
+- REST API with repository/service/handler separation and API key authentication.
+- OpenAPI contract in `api/openapi.yaml`.
+- JobQueue abstraction with in-memory and RabbitMQ implementations.
+- RabbitMQ durable queue, dead-letter queue, ack/nack, retry, idempotent `job_id`, prefetch, and bounded in-memory backpressure.
+- Prometheus-compatible metrics on `/metrics`, health probes on `/healthz` and dependency-aware `/readyz`, optional pprof.
+- Docker multi-stage build with Alpine runtime.
+- GitHub Actions for tests, race detector, `go vet`, Staticcheck, govulncheck, Trivy scans, SBOM generation, integration tests, and container build.
+- Kubernetes manifests for API, Scheduler, Worker, PostgreSQL, RabbitMQ, NetworkPolicy, and optional KEDA queue-based worker scaling.
 
-## Features
+## Architecture
 
-- Create, list, update, delete, and manually check monitors through REST.
-- Check history and monitor statistics.
-- Concurrent worker pool with bounded queueing.
-- Scheduler with duplicate-pending protection.
-- Validated environment configuration with safe defaults.
-- SSRF protection for URL schemes, redirects, DNS resolution, private networks, metadata IP ranges, proxy usage, and allowed egress ports.
-- Response header and body limits.
-- Optional external seed URL file in newline or JSON-array format.
-- Optional webhook alerts after repeated failures.
-- Build metadata embedded through Docker build arguments.
+The same binary can run as separate roles:
+
+```text
+APP_ROLE=api        REST API, OpenAPI, health, readiness, metrics
+APP_ROLE=scheduler  claims due monitors and publishes check jobs
+APP_ROLE=worker     consumes jobs and stores check results
+APP_ROLE=all        local all-in-one mode
+```
+
+Storage and queue backends are configurable:
+
+```text
+STORAGE_TYPE=memory|postgres
+QUEUE_TYPE=memory|rabbitmq
+```
+
+Without `DATABASE_URL` or `RABBITMQ_URL`, the service uses in-memory backends for local development. Production and Kubernetes use PostgreSQL and RabbitMQ.
+
+```mermaid
+flowchart LR
+  Client["Client"] --> API["API role x2"]
+  API --> PG[("PostgreSQL")]
+  Scheduler["Scheduler role x1"] --> PG
+  Scheduler --> Rabbit[("RabbitMQ queue")]
+  Rabbit --> Worker["Worker role x1-10"]
+  Worker --> PG
+  Worker --> Sites["External websites"]
+  API --> Metrics["/metrics /healthz /readyz"]
+  Scheduler --> Metrics
+  Worker --> Metrics
+```
 
 ## REST API
 
@@ -51,6 +74,14 @@ DELETE /api/v1/monitors/{id}
 GET    /api/v1/monitors/{id}/checks
 POST   /api/v1/monitors/{id}/check
 GET    /api/v1/monitors/{id}/stats
+GET    /api/v1/incidents
+```
+
+If `API_KEY` is set, REST requests must include either:
+
+```text
+X-API-Key: <key>
+Authorization: Bearer <key>
 ```
 
 Create monitor:
@@ -58,30 +89,77 @@ Create monitor:
 ```bash
 curl -sS -X POST http://localhost:8080/api/v1/monitors \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me" \
   -d '{"url":"https://example.com","interval_seconds":60,"timeout_seconds":5,"expected_status":200}'
 ```
 
 ## Run Locally
+
+Fast local mode:
 
 ```bash
 go test ./...
 go run .
 ```
 
-The service starts on `:8080` by default:
+Production-like local mode:
+
+```bash
+STORAGE_TYPE=postgres \
+DATABASE_URL='postgres://site_checker:site_checker@localhost:5432/site_checker?sslmode=disable' \
+QUEUE_TYPE=rabbitmq \
+RABBITMQ_URL='amqp://site_checker:site_checker@localhost:5672/' \
+API_KEY='change-me' \
+go run .
+```
+
+Docker Compose mode:
+
+```bash
+docker compose up --build
+```
+
+RabbitMQ Management UI is exposed on:
+
+```text
+http://localhost:15672
+```
+
+The HTTP server starts on `:8080` by default:
 
 - `GET /healthz`
 - `GET /readyz`
 - `GET /metrics`
 - `GET /api/openapi.yaml`
 
-## Benchmarks
+## Tests
+
+```bash
+go test ./...
+go test -race ./...
+go vet ./...
+```
+
+Make targets:
+
+```bash
+make ci
+make integration
+make docker-smoke
+make k8s-dry-run
+```
+
+Integration tests use testcontainers-go and require Docker:
+
+```bash
+go test -tags=integration ./...
+```
+
+Benchmarks:
 
 ```bash
 go test -bench=. -benchmem
 ```
-
-The benchmark suite compares worker-pool behavior at different worker counts.
 
 ## pprof
 
@@ -112,14 +190,14 @@ docker run --rm \
   --name site-checker \
   --read-only \
   --cpus=0.5 \
-  --memory=128m \
+  --memory=256m \
   -p 8080:8080 \
   site-checker
 ```
 
 ## Kubernetes
 
-Baseline manifests live in:
+Manifests live in:
 
 ```text
 deploy/kubernetes/
@@ -131,16 +209,58 @@ Apply:
 kubectl apply -f deploy/kubernetes/
 ```
 
-The current implementation stores monitor state in memory, so the Kubernetes `Deployment` intentionally uses `replicas: 1`. Horizontal API/Scheduler/Worker scaling should be introduced together with PostgreSQL and RabbitMQ so checks are not duplicated and monitor state is not lost.
+The Kubernetes setup demonstrates:
+
+- API deployment with 2 replicas.
+- Scheduler deployment with 1 replica.
+- Worker deployment with 3 replicas.
+- PostgreSQL and RabbitMQ demo deployments.
+- Optional KEDA `ScaledObject` for RabbitMQ queue-length scaling from 1 to 10 workers.
+- NetworkPolicy default-deny baseline with explicit DNS, PostgreSQL, RabbitMQ, and HTTP/HTTPS egress.
+- Probes, Services, ConfigMap, Secret, resource requests/limits, rolling updates, graceful termination, and non-root security contexts.
+
+Apply optional KEDA scaling after installing the KEDA operator:
+
+```bash
+kubectl apply -f deploy/kubernetes/keda/
+```
+
+Scale workers manually for the portfolio scenario:
+
+```bash
+kubectl -n site-checker scale deployment/site-checker-worker --replicas=1
+kubectl -n site-checker scale deployment/site-checker-worker --replicas=3
+kubectl -n site-checker scale deployment/site-checker-worker --replicas=6
+```
+
+Expected demonstration:
+
+- 1 worker: backlog grows.
+- 3 workers: backlog stabilizes.
+- 6 workers: backlog disappears faster.
 
 ## Configuration
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `WORKER_COUNT` | `10` | Number of concurrent workers. |
+| `APP_ROLE` | `all` | Runtime role: `all`, `api`, `scheduler`, or `worker`. |
+| `STORAGE_TYPE` | `memory` or `postgres` when `DATABASE_URL` is set | Storage backend. |
+| `DATABASE_URL` | empty | PostgreSQL connection string. Required for `STORAGE_TYPE=postgres`. |
+| `RUN_MIGRATIONS` | `true` | Runs embedded SQL migrations on startup. |
+| `API_KEY` | empty | Enables REST API key authentication when set. |
+| `QUEUE_TYPE` | `memory` or `rabbitmq` when `RABBITMQ_URL` is set | Job queue backend. |
+| `RABBITMQ_URL` | empty | RabbitMQ AMQP URL. Required for `QUEUE_TYPE=rabbitmq`. |
+| `QUEUE_NAME` | `site_checker.checks` | Main check job queue. |
+| `DEAD_LETTER_QUEUE_NAME` | `site_checker.checks.dead` | RabbitMQ dead-letter queue. |
+| `QUEUE_BUFFER_SIZE` | `1000` | In-memory queue buffer size. |
+| `QUEUE_PREFETCH` | `10` | RabbitMQ consumer prefetch. |
+| `MAX_JOB_ATTEMPTS` | `3` | Retry attempts before dead-lettering infrastructure failures. |
+| `WORKER_COUNT` | `10` | Number of worker goroutines in each worker process. |
+| `SCHEDULER_BATCH_SIZE` | `100` | Number of due monitors claimed per scheduler tick. |
+| `CHECK_LEASE_TIMEOUT` | `2m` | Reclaims stale pending monitor checks after scheduler or worker failure. |
 | `CHECK_INTERVAL` | `5m` | Default interval for seeded monitors. |
-| `HTTP_TIMEOUT` | `5s` | Default timeout for outbound requests. |
-| `HEALTH_ADDR` | `:8080` | Address for API, health, and metrics endpoints. Set to empty to disable. |
+| `HTTP_TIMEOUT` | `5s` | Default timeout for outbound checks. |
+| `HEALTH_ADDR` | `:8080` | Address for REST, health, and metrics endpoints. |
 | `URLS_FILE` | empty | Optional path to a newline file or JSON array with seed URLs. |
 | `EXPECTED_STATUS` | `200-399` | Accepted status codes for legacy seeded checks. |
 | `MAX_REDIRECTS` | `3` | Maximum allowed redirects. |
@@ -174,3 +294,5 @@ URLS_FILE=urls.example.txt go run .
 ## Security Defaults
 
 By default, Site Checker blocks private networks, loopback addresses, link-local ranges, metadata IPs such as `169.254.169.254`, unsupported schemes, userinfo in URLs, unexpected ports, unsafe redirects, and environment proxies. Enable overrides only for trusted internal deployments.
+
+Kubernetes `secret.yaml` contains local-demo placeholder values. Production deployments should use External Secrets Operator, SOPS, Sealed Secrets, or a managed secret store with rotation.

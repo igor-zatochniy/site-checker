@@ -11,9 +11,14 @@ import (
 )
 
 const (
+	defaultAppRole               = "all"
+	defaultStorageType           = "memory"
+	defaultQueueType             = "memory"
 	defaultWorkerCount           = 10
+	defaultSchedulerBatchSize    = 100
 	defaultCheckInterval         = 5 * time.Minute
 	defaultHTTPTimeout           = 5 * time.Second
+	defaultCheckLeaseTimeout     = 2 * time.Minute
 	defaultHealthAddr            = ":8080"
 	defaultMaxRedirects          = 3
 	defaultMaxBodyBytes          = 64 * 1024
@@ -23,12 +28,31 @@ const (
 	defaultAlertFailureThreshold = 3
 	defaultAlertCooldown         = 10 * time.Minute
 	defaultUserAgent             = "site-checker"
+	defaultQueueBufferSize       = 1000
+	defaultQueuePrefetch         = 10
+	defaultMaxJobAttempts        = 3
+	defaultQueueName             = "site_checker.checks"
+	defaultDeadLetterQueueName   = "site_checker.checks.dead"
 )
 
 type Config struct {
+	AppRole               string
+	StorageType           string
+	DatabaseURL           string
+	RunMigrations         bool
+	APIKey                string
+	QueueType             string
+	RabbitMQURL           string
+	QueueName             string
+	DeadLetterQueueName   string
+	QueueBufferSize       int
+	QueuePrefetch         int
+	MaxJobAttempts        int
 	WorkerCount           int
+	SchedulerBatchSize    int
 	CheckInterval         time.Duration
 	HTTPTimeout           time.Duration
+	CheckLeaseTimeout     time.Duration
 	HealthAddr            string
 	ReadinessStaleAfter   time.Duration
 	StartupGracePeriod    time.Duration
@@ -51,9 +75,37 @@ func LoadConfig() (Config, error) {
 	var errs []error
 	cfg := Config{}
 
+	cfg.AppRole = envEnum("APP_ROLE", defaultAppRole, []string{"all", "api", "scheduler", "worker"}, &errs)
+	cfg.DatabaseURL = envString("DATABASE_URL", "")
+	cfg.StorageType = envString("STORAGE_TYPE", "")
+	if cfg.StorageType == "" {
+		cfg.StorageType = defaultStorageType
+		if cfg.DatabaseURL != "" {
+			cfg.StorageType = "postgres"
+		}
+	}
+	cfg.StorageType = validateEnum("STORAGE_TYPE", cfg.StorageType, []string{"memory", "postgres"}, &errs)
+	cfg.RunMigrations = envBool("RUN_MIGRATIONS", true, &errs)
+	cfg.APIKey = envString("API_KEY", "")
+	cfg.RabbitMQURL = envString("RABBITMQ_URL", "")
+	cfg.QueueType = envString("QUEUE_TYPE", "")
+	if cfg.QueueType == "" {
+		cfg.QueueType = defaultQueueType
+		if cfg.RabbitMQURL != "" {
+			cfg.QueueType = "rabbitmq"
+		}
+	}
+	cfg.QueueType = validateEnum("QUEUE_TYPE", cfg.QueueType, []string{"memory", "rabbitmq"}, &errs)
+	cfg.QueueName = envString("QUEUE_NAME", defaultQueueName)
+	cfg.DeadLetterQueueName = envString("DEAD_LETTER_QUEUE_NAME", defaultDeadLetterQueueName)
+	cfg.QueueBufferSize = envInt("QUEUE_BUFFER_SIZE", defaultQueueBufferSize, 1, 100000, &errs)
+	cfg.QueuePrefetch = envInt("QUEUE_PREFETCH", defaultQueuePrefetch, 1, 1000, &errs)
+	cfg.MaxJobAttempts = envInt("MAX_JOB_ATTEMPTS", defaultMaxJobAttempts, 1, 20, &errs)
 	cfg.WorkerCount = envInt("WORKER_COUNT", defaultWorkerCount, 1, 100, &errs)
+	cfg.SchedulerBatchSize = envInt("SCHEDULER_BATCH_SIZE", defaultSchedulerBatchSize, 1, 1000, &errs)
 	cfg.CheckInterval = envDuration("CHECK_INTERVAL", defaultCheckInterval, 30*time.Second, 24*time.Hour, &errs)
 	cfg.HTTPTimeout = envDuration("HTTP_TIMEOUT", defaultHTTPTimeout, time.Second, time.Minute, &errs)
+	cfg.CheckLeaseTimeout = envDuration("CHECK_LEASE_TIMEOUT", defaultCheckLeaseTimeout, cfg.HTTPTimeout, 24*time.Hour, &errs)
 	cfg.HealthAddr = envString("HEALTH_ADDR", defaultHealthAddr)
 	cfg.MaxRedirects = envInt("MAX_REDIRECTS", defaultMaxRedirects, 0, 10, &errs)
 	cfg.MaxBodyBytes = int64(envInt("MAX_BODY_BYTES", defaultMaxBodyBytes, 1024, 10*1024*1024, &errs))
@@ -85,6 +137,18 @@ func LoadConfig() (Config, error) {
 
 	if cfg.UserAgent == "" {
 		errs = append(errs, errors.New("USER_AGENT must not be empty"))
+	}
+	if cfg.StorageType == "postgres" && cfg.DatabaseURL == "" {
+		errs = append(errs, errors.New("DATABASE_URL is required when STORAGE_TYPE=postgres"))
+	}
+	if cfg.QueueType == "rabbitmq" && cfg.RabbitMQURL == "" {
+		errs = append(errs, errors.New("RABBITMQ_URL is required when QUEUE_TYPE=rabbitmq"))
+	}
+	if cfg.QueueName == "" {
+		errs = append(errs, errors.New("QUEUE_NAME must not be empty"))
+	}
+	if cfg.DeadLetterQueueName == "" {
+		errs = append(errs, errors.New("DEAD_LETTER_QUEUE_NAME must not be empty"))
 	}
 
 	if len(errs) > 0 {
@@ -152,6 +216,21 @@ func envBool(key string, defaultValue bool, errs *[]error) bool {
 		*errs = append(*errs, fmt.Errorf("%s must be a boolean", key))
 		return defaultValue
 	}
+}
+
+func envEnum(key, defaultValue string, allowed []string, errs *[]error) string {
+	return validateEnum(key, envString(key, defaultValue), allowed, errs)
+}
+
+func validateEnum(key, value string, allowed []string, errs *[]error) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, candidate := range allowed {
+		if value == candidate {
+			return value
+		}
+	}
+	*errs = append(*errs, fmt.Errorf("%s must be one of %s", key, strings.Join(allowed, ", ")))
+	return allowed[0]
 }
 
 func envPorts(key, defaultValue string, errs *[]error) map[int]struct{} {

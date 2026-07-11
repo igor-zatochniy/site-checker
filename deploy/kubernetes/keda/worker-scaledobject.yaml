@@ -1,0 +1,38 @@
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: site-checker-rabbitmq-auth
+  namespace: site-checker
+  labels:
+    app.kubernetes.io/name: site-checker
+    app.kubernetes.io/component: worker
+spec:
+  secretTargetRef:
+    - parameter: host
+      name: site-checker-secret
+      key: RABBITMQ_URL
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: site-checker-worker
+  namespace: site-checker
+  labels:
+    app.kubernetes.io/name: site-checker
+    app.kubernetes.io/component: worker
+spec:
+  scaleTargetRef:
+    name: site-checker-worker
+  pollingInterval: 15
+  cooldownPeriod: 60
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  triggers:
+    - type: rabbitmq
+      metadata:
+        protocol: amqp
+        queueName: site_checker.checks
+        mode: QueueLength
+        value: "25"
+      authenticationRef:
+        name: site-checker-rabbitmq-auth
