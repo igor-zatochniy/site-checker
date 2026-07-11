@@ -1,0 +1,359 @@
+openapi: 3.1.0
+info:
+  title: Site Checker API
+  version: 0.1.0
+  description: REST API for managing website availability monitors.
+servers:
+  - url: http://localhost:8080
+tags:
+  - name: Monitors
+paths:
+  /api/v1/monitors:
+    get:
+      tags: [Monitors]
+      summary: List monitors
+      operationId: listMonitors
+      parameters:
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Monitor list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MonitorListResponse"
+    post:
+      tags: [Monitors]
+      summary: Create monitor
+      operationId: createMonitor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MonitorInput"
+            examples:
+              example:
+                value:
+                  url: https://example.com
+                  interval_seconds: 60
+                  timeout_seconds: 5
+                  expected_status: 200
+      responses:
+        "201":
+          description: Monitor created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Monitor"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/monitors/{id}:
+    parameters:
+      - $ref: "#/components/parameters/MonitorID"
+    get:
+      tags: [Monitors]
+      summary: Get monitor
+      operationId: getMonitor
+      responses:
+        "200":
+          description: Monitor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Monitor"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [Monitors]
+      summary: Update monitor
+      operationId: updateMonitor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MonitorPatch"
+      responses:
+        "200":
+          description: Monitor updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Monitor"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      tags: [Monitors]
+      summary: Delete monitor
+      operationId: deleteMonitor
+      responses:
+        "204":
+          description: Monitor deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/monitors/{id}/checks:
+    parameters:
+      - $ref: "#/components/parameters/MonitorID"
+    get:
+      tags: [Monitors]
+      summary: List monitor checks
+      operationId: listMonitorChecks
+      parameters:
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Check history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckListResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/monitors/{id}/check:
+    parameters:
+      - $ref: "#/components/parameters/MonitorID"
+    post:
+      tags: [Monitors]
+      summary: Run manual check
+      operationId: runManualCheck
+      responses:
+        "202":
+          description: Check completed and stored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckRecord"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/monitors/{id}/stats:
+    parameters:
+      - $ref: "#/components/parameters/MonitorID"
+    get:
+      tags: [Monitors]
+      summary: Get monitor statistics
+      operationId: getMonitorStats
+      responses:
+        "200":
+          description: Monitor statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MonitorStats"
+        "404":
+          $ref: "#/components/responses/NotFound"
+components:
+  parameters:
+    MonitorID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      example: mon_01abcdef
+    Offset:
+      name: offset
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: Monitor already exists
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Monitor not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    MonitorInput:
+      type: object
+      additionalProperties: false
+      required: [url, interval_seconds, timeout_seconds, expected_status]
+      properties:
+        url:
+          type: string
+          format: uri
+          example: https://example.com
+        interval_seconds:
+          type: integer
+          minimum: 30
+          maximum: 86400
+          example: 60
+        timeout_seconds:
+          type: integer
+          minimum: 1
+          maximum: 60
+          example: 5
+        expected_status:
+          type: integer
+          minimum: 100
+          maximum: 599
+          example: 200
+        enabled:
+          type: boolean
+          default: true
+    MonitorPatch:
+      type: object
+      additionalProperties: false
+      properties:
+        url:
+          type: string
+          format: uri
+        interval_seconds:
+          type: integer
+          minimum: 30
+          maximum: 86400
+        timeout_seconds:
+          type: integer
+          minimum: 1
+          maximum: 60
+        expected_status:
+          type: integer
+          minimum: 100
+          maximum: 599
+        enabled:
+          type: boolean
+    Monitor:
+      allOf:
+        - $ref: "#/components/schemas/MonitorInput"
+        - type: object
+          required: [id, status, enabled, next_check_at, created_at, updated_at]
+          properties:
+            id:
+              type: string
+            status:
+              type: string
+              enum: [active, disabled]
+            next_check_at:
+              type: string
+              format: date-time
+            created_at:
+              type: string
+              format: date-time
+            updated_at:
+              type: string
+              format: date-time
+            last_status_code:
+              type: integer
+            last_latency_ms:
+              type: integer
+            last_checked_at:
+              type: string
+              format: date-time
+            last_error:
+              type: string
+    CheckRecord:
+      type: object
+      required: [id, monitor_id, status_code, latency_ms, success, checked_at]
+      properties:
+        id:
+          type: string
+        monitor_id:
+          type: string
+        status_code:
+          type: integer
+        latency_ms:
+          type: integer
+        error:
+          type: string
+        success:
+          type: boolean
+        checked_at:
+          type: string
+          format: date-time
+    MonitorStats:
+      type: object
+      required: [monitor_id, uptime_percent, average_latency_ms, checks_total, successful_checks, failed_checks]
+      properties:
+        monitor_id:
+          type: string
+        uptime_percent:
+          type: number
+          format: double
+        average_latency_ms:
+          type: number
+          format: double
+        checks_total:
+          type: integer
+        successful_checks:
+          type: integer
+        failed_checks:
+          type: integer
+        last_checked_at:
+          type: string
+          format: date-time
+        last_status_code:
+          type: integer
+        consecutive_failures:
+          type: integer
+    MonitorListResponse:
+      type: object
+      required: [items, total, offset, limit]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Monitor"
+        total:
+          type: integer
+        offset:
+          type: integer
+        limit:
+          type: integer
+    CheckListResponse:
+      type: object
+      required: [items, total, offset, limit]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CheckRecord"
+        total:
+          type: integer
+        offset:
+          type: integer
+        limit:
+          type: integer
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
