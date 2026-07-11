@@ -88,6 +88,38 @@ func TestRabbitMQQueueRetriesAndDeadLetters(t *testing.T) {
 	if deadLetter.JobID != job.JobID {
 		t.Fatalf("dead-letter job_id = %q, want %q", deadLetter.JobID, job.JobID)
 	}
+
+	queue.mu.RLock()
+	connection := queue.conn
+	queue.mu.RUnlock()
+	if connection == nil {
+		t.Fatal("RabbitMQ connection is nil before reconnect test")
+	}
+	if err := connection.Close(); err != nil {
+		t.Fatalf("close RabbitMQ connection: %v", err)
+	}
+
+	reconnectCtx, reconnectCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer reconnectCancel()
+	recoveredJob := CheckJobMessage{
+		JobID:      "job_integration_reconnect",
+		MonitorID:  "mon_integration",
+		Attempt:    1,
+		EnqueuedAt: time.Now().UTC(),
+	}
+	if err := queue.Publish(reconnectCtx, recoveredJob); err != nil {
+		t.Fatalf("publish after connection loss: %v", err)
+	}
+	recovered := receiveRabbitDelivery(t, deliveries)
+	if recovered.Job.JobID != recoveredJob.JobID {
+		t.Fatalf("recovered job_id = %q, want %q", recovered.Job.JobID, recoveredJob.JobID)
+	}
+	if err := recovered.Ack(reconnectCtx); err != nil {
+		t.Fatalf("ack after reconnect: %v", err)
+	}
+	if err := queue.Ping(reconnectCtx); err != nil {
+		t.Fatalf("ping after reconnect: %v", err)
+	}
 }
 
 func receiveRabbitDelivery(t *testing.T, deliveries <-chan QueueDelivery) QueueDelivery {
@@ -105,9 +137,17 @@ func receiveRabbitDeadLetter(t *testing.T, ctx context.Context, queue *RabbitMQQ
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		queue.mu.Lock()
-		delivery, ok, err := queue.channel.Get(queue.dlqName, true)
-		queue.mu.Unlock()
+		if err := queue.ensureConnected(ctx); err != nil {
+			t.Fatal(err)
+		}
+		queue.publishMu.Lock()
+		channel := queue.publishChannel()
+		if channel == nil {
+			queue.publishMu.Unlock()
+			continue
+		}
+		delivery, ok, err := channel.Get(queue.dlqName, true)
+		queue.publishMu.Unlock()
 		if err != nil {
 			t.Fatal(err)
 		}
