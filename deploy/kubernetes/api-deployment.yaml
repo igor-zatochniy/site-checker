@@ -37,7 +37,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: api
-          image: ghcr.io/igor-zatochniy/site-checker:latest
+          image: ghcr.io/igor-zatochniy/site-checker:v0.1.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

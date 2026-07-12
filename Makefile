@@ -42,7 +42,7 @@ docker-smoke: docker-build
 	docker rm $(CONTAINER)
 
 k8s-dry-run:
-	$(KUBECTL) apply --dry-run=client -f deploy/kubernetes/
+	$(KUBECTL) apply --dry-run=client -k deploy/kubernetes/
 
 compose-up:
 	docker compose up --build

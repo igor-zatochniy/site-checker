@@ -2,7 +2,7 @@ module github.com/igor-zatochniy/site-checker
 
 go 1.26
 
-toolchain go1.26.2
+toolchain go1.26.5
 
 require (
 	github.com/jackc/pgx/v5 v5.10.0
@@ -68,4 +68,3 @@ require (
 	golang.org/x/text v0.37.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-

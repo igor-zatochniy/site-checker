@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-ARG GO_VERSION=1.26.2
-ARG ALPINE_VERSION=3.23
+ARG GO_VERSION=1.26.5
+ARG ALPINE_VERSION=3.24
 
 # --- Stage 1: Builder ---
 FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
@@ -44,4 +44,3 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
     CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1
 
 ENTRYPOINT ["/app/site-checker"]
-

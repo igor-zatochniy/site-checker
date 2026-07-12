@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - postgres.yaml
+  - rabbitmq.yaml
+  - api-deployment.yaml
+  - scheduler-deployment.yaml
+  - worker-deployment.yaml
+  - alert-dispatcher-deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml
+
+images:
+  - name: ghcr.io/igor-zatochniy/site-checker
+    newName: ghcr.io/igor-zatochniy/site-checker
+    newTag: v0.1.0
