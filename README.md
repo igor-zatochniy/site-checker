@@ -225,7 +225,7 @@ Apply optional KEDA scaling after installing the KEDA operator:
 kubectl apply -f deploy/kubernetes/keda/
 ```
 
-Scale workers manually for the portfolio scenario:
+Scale workers manually to observe queue-processing behavior:
 
 ```bash
 kubectl -n site-checker scale deployment/site-checker-worker --replicas=1
