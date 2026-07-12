@@ -36,6 +36,7 @@ const (
 )
 
 type Config struct {
+	AppEnv                string
 	AppRole               string
 	StorageType           string
 	DatabaseURL           string
@@ -63,6 +64,8 @@ type Config struct {
 	AllowProxyEnv         bool
 	AllowedPorts          map[int]struct{}
 	URLsFile              string
+	SeedURLsFile          string
+	SeedDefaultLinks      bool
 	ExpectedStatus        StatusPolicy
 	AlertWebhookURL       string
 	AlertFailureThreshold int
@@ -75,6 +78,7 @@ func LoadConfig() (Config, error) {
 	var errs []error
 	cfg := Config{}
 
+	cfg.AppEnv = strings.ToLower(envString("APP_ENV", "production"))
 	cfg.AppRole = envEnum("APP_ROLE", defaultAppRole, []string{"all", "api", "scheduler", "worker"}, &errs)
 	cfg.DatabaseURL = envString("DATABASE_URL", "")
 	cfg.StorageType = envString("STORAGE_TYPE", "")
@@ -114,6 +118,8 @@ func LoadConfig() (Config, error) {
 	cfg.AllowProxyEnv = envBool("ALLOW_PROXY_ENV", false, &errs)
 	cfg.AllowedPorts = envPorts("ALLOWED_PORTS", defaultAllowedPorts, &errs)
 	cfg.URLsFile = envString("URLS_FILE", "")
+	cfg.SeedURLsFile = envString("SEED_URLS_FILE", cfg.URLsFile)
+	cfg.SeedDefaultLinks = envBool("SEED_DEFAULT_LINKS", false, &errs) || cfg.AppEnv == "demo"
 	cfg.AlertWebhookURL = envString("ALERT_WEBHOOK_URL", "")
 	cfg.AlertFailureThreshold = envInt("ALERT_FAILURE_THRESHOLD", defaultAlertFailureThreshold, 1, 100, &errs)
 	cfg.AlertCooldown = envDuration("ALERT_COOLDOWN", defaultAlertCooldown, 0, 24*time.Hour, &errs)

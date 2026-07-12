@@ -102,6 +102,8 @@ go test ./...
 go run .
 ```
 
+The service starts with no seeded monitors by default. Add monitors through the REST API, provide `SEED_URLS_FILE`, or explicitly enable demo links with `SEED_DEFAULT_LINKS=true` / `APP_ENV=demo`.
+
 Production-like local mode:
 
 ```bash
@@ -243,6 +245,7 @@ Expected demonstration:
 
 | Variable | Default | Description |
 | --- | --- | --- |
+| `APP_ENV` | `production` | Runtime environment label. `demo` enables built-in demo seed links. |
 | `APP_ROLE` | `all` | Runtime role: `all`, `api`, `scheduler`, or `worker`. |
 | `STORAGE_TYPE` | `memory` or `postgres` when `DATABASE_URL` is set | Storage backend. |
 | `DATABASE_URL` | empty | PostgreSQL connection string. Required for `STORAGE_TYPE=postgres`. |
@@ -257,11 +260,13 @@ Expected demonstration:
 | `MAX_JOB_ATTEMPTS` | `3` | Retry attempts before dead-lettering infrastructure failures. |
 | `WORKER_COUNT` | `10` | Number of worker goroutines in each worker process. |
 | `SCHEDULER_BATCH_SIZE` | `100` | Number of due monitors claimed per scheduler tick. |
-| `CHECK_LEASE_TIMEOUT` | `2m` | Reclaims stale pending monitor checks after scheduler or worker failure. |
+| `CHECK_LEASE_TIMEOUT` | `2m` | Reclaims stale queued jobs or processing jobs. The processing lease starts when a worker begins handling the job. |
 | `CHECK_INTERVAL` | `5m` | Default interval for seeded monitors. |
 | `HTTP_TIMEOUT` | `5s` | Default timeout for outbound checks. |
 | `HEALTH_ADDR` | `:8080` | Address for REST, health, and metrics endpoints. |
-| `URLS_FILE` | empty | Optional path to a newline file or JSON array with seed URLs. |
+| `SEED_URLS_FILE` | empty | Explicit path to a newline file or JSON array with seed URLs. Only `all` and `scheduler` roles seed monitors. |
+| `SEED_DEFAULT_LINKS` | `false` | Enables built-in demo seed links. Keep disabled for normal deployments. |
+| `URLS_FILE` | empty | Legacy alias for `SEED_URLS_FILE` when `SEED_URLS_FILE` is unset. |
 | `EXPECTED_STATUS` | `200-399` | Accepted status codes for legacy seeded checks. |
 | `MAX_REDIRECTS` | `3` | Maximum allowed redirects. |
 | `MAX_BODY_BYTES` | `65536` | Maximum response body bytes to read. |
@@ -288,7 +293,13 @@ https://openai.com
 Run with an external URL file:
 
 ```bash
-URLS_FILE=urls.example.txt go run .
+SEED_URLS_FILE=urls.example.txt go run .
+```
+
+Run with built-in demo links:
+
+```bash
+APP_ENV=demo go run .
 ```
 
 ## Security Defaults

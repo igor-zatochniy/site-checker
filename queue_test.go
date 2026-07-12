@@ -26,7 +26,7 @@ func TestInMemoryQueueDeduplicatesPublishedJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deliveries, err := queue.Consume(ctx)
+	deliveries, _, err := queue.Consume(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,8 +36,14 @@ func TestInMemoryQueueDeduplicatesPublishedJobs(t *testing.T) {
 		if delivery.Job.JobID != job.JobID {
 			t.Fatalf("job_id = %q, want %q", delivery.Job.JobID, job.JobID)
 		}
+		if err := delivery.Ack(ctx); err != nil {
+			t.Fatal(err)
+		}
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for delivery")
+	}
+	if got := queueSeenLen(queue); got != 0 {
+		t.Fatalf("seen len after ack = %d, want 0", got)
 	}
 
 	select {
@@ -64,7 +70,7 @@ func TestInMemoryQueueRetriesAndThenDeadLetters(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deliveries, err := queue.Consume(ctx)
+	deliveries, _, err := queue.Consume(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +78,9 @@ func TestInMemoryQueueRetriesAndThenDeadLetters(t *testing.T) {
 	first := receiveDelivery(t, deliveries)
 	if err := first.Nack(ctx, true); err != nil {
 		t.Fatal(err)
+	}
+	if got := queueSeenLen(queue); got != 1 {
+		t.Fatalf("seen len after retry nack = %d, want 1", got)
 	}
 
 	second := receiveDelivery(t, deliveries)
@@ -87,6 +96,9 @@ func TestInMemoryQueueRetriesAndThenDeadLetters(t *testing.T) {
 		if dead.JobID != job.JobID {
 			t.Fatalf("dead-letter job_id = %q, want %q", dead.JobID, job.JobID)
 		}
+		if got := queueSeenLen(queue); got != 0 {
+			t.Fatalf("seen len after dead-letter = %d, want 0", got)
+		}
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for dead-letter job")
 	}
@@ -101,4 +113,10 @@ func receiveDelivery(t *testing.T, deliveries <-chan QueueDelivery) QueueDeliver
 		t.Fatal("timed out waiting for delivery")
 		return QueueDelivery{}
 	}
+}
+
+func queueSeenLen(queue *InMemoryQueue) int {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	return len(queue.seen)
 }

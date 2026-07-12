@@ -53,7 +53,7 @@ func TestRabbitMQQueueRetriesAndDeadLetters(t *testing.T) {
 	}
 	defer queue.Close()
 
-	deliveries, err := queue.Consume(ctx)
+	deliveries, _, err := queue.Consume(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
