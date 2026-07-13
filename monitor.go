@@ -65,6 +65,8 @@ type Incident struct {
 	LastFailureAt  time.Time `json:"last_failure_at"`
 	ResolvedAt     time.Time `json:"resolved_at,omitempty"`
 	LastError      string    `json:"last_error,omitempty"`
+	LastAlertedAt  time.Time `json:"last_alerted_at,omitempty"`
+	AlertCount     int       `json:"alert_count"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }

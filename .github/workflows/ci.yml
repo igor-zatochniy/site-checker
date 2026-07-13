@@ -101,16 +101,58 @@ jobs:
           artifact-name: site-checker-sbom.spdx.json
 
       - name: Push release image
+        id: release-image
         if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
           build-args: |
             VERSION=${{ github.ref_name }}
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
+
+      - name: Set up kubectl
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.32.2
+
+      - name: Render immutable Kubernetes release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          IMAGE_NAME: ghcr.io/${{ github.repository }}
+          IMAGE_DIGEST: ${{ steps.release-image.outputs.digest }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test -n "${IMAGE_DIGEST}"
+          mkdir -p dist/release
+          cat > dist/release/kustomization.yaml <<EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          resources:
+            - ../../deploy/kubernetes
+          images:
+            - name: ghcr.io/igor-zatochniy/site-checker
+              newName: ${IMAGE_NAME}
+              digest: ${IMAGE_DIGEST}
+          EOF
+          kubectl kustomize dist/release > "dist/site-checker-kubernetes-${RELEASE_TAG}.yaml"
+          printf '%s\n' "${IMAGE_NAME}@${IMAGE_DIGEST}" > "dist/site-checker-image-${RELEASE_TAG}.txt"
+          test "$(grep -cF "image: ${IMAGE_NAME}@${IMAGE_DIGEST}" "dist/site-checker-kubernetes-${RELEASE_TAG}.yaml")" -eq 4
+
+      - name: Upload immutable Kubernetes release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-checker-kubernetes-${{ github.ref_name }}
+          path: |
+            dist/site-checker-kubernetes-${{ github.ref_name }}.yaml
+            dist/site-checker-image-${{ github.ref_name }}.txt
+          if-no-files-found: error
 
   integration:
     name: Integration tests

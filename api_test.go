@@ -20,7 +20,7 @@ func TestAPIManageMonitorLifecycle(t *testing.T) {
 	store := NewMonitorStore(policy)
 	metrics := NewMetrics("test", "commit", "date", 0)
 	checker := NewChecker(http.DefaultClient, cfg, metrics)
-	service := NewMonitorService(NewInMemoryMonitorRepositoryFromStore(store), checker, metrics, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	service := NewMonitorService(NewInMemoryMonitorRepositoryFromStore(store), checker, metrics, AlertPolicy{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	handler := NewAPIHandler(service, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	mux := http.NewServeMux()
@@ -73,7 +73,7 @@ func TestAPIReturnsValidationError(t *testing.T) {
 	policy := NewNetworkPolicy(cfg)
 	store := NewMonitorStore(policy)
 	metrics := NewMetrics("test", "commit", "date", 0)
-	service := NewMonitorService(NewInMemoryMonitorRepositoryFromStore(store), NewChecker(http.DefaultClient, cfg, metrics), metrics, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	service := NewMonitorService(NewInMemoryMonitorRepositoryFromStore(store), NewChecker(http.DefaultClient, cfg, metrics), metrics, AlertPolicy{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	handler := NewAPIHandler(service, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	mux := http.NewServeMux()
@@ -94,7 +94,7 @@ func TestAPIRequiresAPIKeyWhenConfigured(t *testing.T) {
 	store := NewMonitorStore(policy)
 	metrics := NewMetrics("test", "commit", "date", 0)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	service := NewMonitorService(NewInMemoryMonitorRepositoryFromStore(store), NewChecker(http.DefaultClient, cfg, metrics), metrics, nil, logger)
+	service := NewMonitorService(NewInMemoryMonitorRepositoryFromStore(store), NewChecker(http.DefaultClient, cfg, metrics), metrics, AlertPolicy{}, logger)
 	handler := NewAPIHandler(service, "secret", logger)
 
 	mux := http.NewServeMux()

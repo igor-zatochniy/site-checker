@@ -329,7 +329,7 @@ components:
           format: date-time
     Incident:
       type: object
-      required: [id, monitor_id, status, failure_count, first_failure_at, last_failure_at, created_at, updated_at]
+      required: [id, monitor_id, status, failure_count, first_failure_at, last_failure_at, alert_count, created_at, updated_at]
       properties:
         id:
           type: string
@@ -351,6 +351,11 @@ components:
           format: date-time
         last_error:
           type: string
+        last_alerted_at:
+          type: string
+          format: date-time
+        alert_count:
+          type: integer
         created_at:
           type: string
           format: date-time

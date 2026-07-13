@@ -120,3 +120,26 @@ func queueSeenLen(queue *InMemoryQueue) int {
 	defer queue.mu.Unlock()
 	return len(queue.seen)
 }
+
+func TestRabbitMQReconnectDelayIsBounded(t *testing.T) {
+	initial := time.Second
+	maximum := 30 * time.Second
+
+	tests := []struct {
+		attempt int
+		want    time.Duration
+	}{
+		{attempt: 0, want: time.Second},
+		{attempt: 1, want: time.Second},
+		{attempt: 2, want: 2 * time.Second},
+		{attempt: 5, want: 16 * time.Second},
+		{attempt: 6, want: 30 * time.Second},
+		{attempt: 100, want: 30 * time.Second},
+	}
+
+	for _, test := range tests {
+		if got := rabbitMQReconnectDelay(test.attempt, initial, maximum); got != test.want {
+			t.Errorf("attempt %d: delay = %s, want %s", test.attempt, got, test.want)
+		}
+	}
+}

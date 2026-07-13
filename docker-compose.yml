@@ -40,6 +40,7 @@ services:
       QUEUE_TYPE: rabbitmq
       RABBITMQ_URL: amqp://site_checker:site_checker@rabbitmq:5672/
       API_KEY: change-me
+      ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL:-}"
       HEALTH_ADDR: :8080
     ports:
       - "8080:8080"
@@ -77,11 +78,28 @@ services:
       QUEUE_TYPE: rabbitmq
       RABBITMQ_URL: amqp://site_checker:site_checker@rabbitmq:5672/
       WORKER_COUNT: "5"
+      ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL:-}"
       HEALTH_ADDR: :8080
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
+        condition: service_healthy
+
+  alert-dispatcher:
+    profiles: ["alerts"]
+    build: .
+    environment:
+      APP_ENV: production
+      APP_ROLE: alert-dispatcher
+      STORAGE_TYPE: postgres
+      DATABASE_URL: postgres://site_checker:site_checker@postgres:5432/site_checker?sslmode=disable
+      ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL:-}"
+      ALERT_FAILURE_THRESHOLD: "3"
+      ALERT_COOLDOWN: 10m
+      HEALTH_ADDR: :8080
+    depends_on:
+      postgres:
         condition: service_healthy
 
 volumes:

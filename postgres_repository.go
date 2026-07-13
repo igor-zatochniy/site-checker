@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -315,7 +317,7 @@ func (r *PostgresMonitorRepository) MarkProcessing(ctx context.Context, id, jobI
 	return ErrJobAlreadyProcessing
 }
 
-func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRecord) (Monitor, error) {
+func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRecord, alertPolicy AlertPolicy) (Monitor, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return Monitor{}, err
@@ -371,7 +373,7 @@ func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRe
 		return Monitor{}, err
 	}
 
-	if err := upsertIncident(ctx, tx, record); err != nil {
+	if err := upsertIncidentAndAlert(ctx, tx, record, monitor, alertPolicy); err != nil {
 		return Monitor{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -502,7 +504,7 @@ func (r *PostgresMonitorRepository) ListIncidents(ctx context.Context, status st
 		}
 		rows, err = r.pool.Query(ctx, `
 			SELECT id, monitor_id, status, failure_count, first_failure_at, last_failure_at,
-				resolved_at, last_error, created_at, updated_at
+				resolved_at, last_error, last_alerted_at, alert_count, created_at, updated_at
 			FROM incidents
 			ORDER BY created_at DESC, id DESC
 			OFFSET $1 LIMIT $2
@@ -513,7 +515,7 @@ func (r *PostgresMonitorRepository) ListIncidents(ctx context.Context, status st
 		}
 		rows, err = r.pool.Query(ctx, `
 			SELECT id, monitor_id, status, failure_count, first_failure_at, last_failure_at,
-				resolved_at, last_error, created_at, updated_at
+				resolved_at, last_error, last_alerted_at, alert_count, created_at, updated_at
 			FROM incidents
 			WHERE status = $1
 			ORDER BY created_at DESC, id DESC
@@ -527,6 +529,116 @@ func (r *PostgresMonitorRepository) ListIncidents(ctx context.Context, status st
 
 	incidents, err := scanIncidents(rows)
 	return incidents, total, err
+}
+
+func (r *PostgresMonitorRepository) ClaimAlerts(ctx context.Context, limit int, now time.Time, leaseTimeout time.Duration) ([]AlertOutboxEvent, error) {
+	leaseToken := newID("lease")
+	lockedUntil := now.UTC().Add(leaseTimeout)
+	rows, err := r.pool.Query(ctx, `
+		WITH candidates AS (
+			SELECT id
+			FROM alert_outbox
+			WHERE (status = 'pending' AND available_at <= $2::timestamptz)
+				OR (status = 'processing' AND locked_until <= $2::timestamptz)
+			ORDER BY available_at, created_at, id
+			FOR UPDATE SKIP LOCKED
+			LIMIT $1
+		)
+		UPDATE alert_outbox AS outbox
+		SET status = 'processing',
+			attempt_count = outbox.attempt_count + 1,
+			lease_token = $3,
+			locked_until = $4::timestamptz,
+			updated_at = $2::timestamptz
+		FROM candidates
+		WHERE outbox.id = candidates.id
+		RETURNING outbox.id, outbox.idempotency_key, outbox.incident_id,
+			outbox.monitor_id, outbox.payload, outbox.attempt_count, outbox.lease_token
+	`, limit, now.UTC(), leaseToken, lockedUntil)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	events := make([]AlertOutboxEvent, 0, limit)
+	for rows.Next() {
+		var (
+			event       AlertOutboxEvent
+			payloadJSON []byte
+		)
+		if err := rows.Scan(
+			&event.ID,
+			&event.IdempotencyKey,
+			&event.IncidentID,
+			&event.MonitorID,
+			&payloadJSON,
+			&event.AttemptCount,
+			&event.LeaseToken,
+		); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(payloadJSON, &event.Payload); err != nil {
+			return nil, fmt.Errorf("decode alert outbox payload %s: %w", event.ID, err)
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func (r *PostgresMonitorRepository) MarkAlertDelivered(ctx context.Context, id, leaseToken string, deliveredAt time.Time) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE alert_outbox
+		SET status = 'delivered',
+			delivered_at = $3::timestamptz,
+			lease_token = NULL,
+			locked_until = NULL,
+			last_error = '',
+			updated_at = $3::timestamptz
+		WHERE id = $1
+			AND status = 'processing'
+			AND lease_token = $2
+	`, id, leaseToken, deliveredAt.UTC())
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrStaleAlertLease
+	}
+	return nil
+}
+
+func (r *PostgresMonitorRepository) MarkAlertFailed(ctx context.Context, id, leaseToken, lastError string, availableAt time.Time, dead bool) error {
+	status := "pending"
+	if dead {
+		status = "dead"
+	}
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE alert_outbox
+		SET status = $3,
+			available_at = $4::timestamptz,
+			lease_token = NULL,
+			locked_until = NULL,
+			last_error = $5,
+			updated_at = now()
+		WHERE id = $1
+			AND status = 'processing'
+			AND lease_token = $2
+	`, id, leaseToken, status, availableAt.UTC(), truncateAlertError(lastError))
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrStaleAlertLease
+	}
+	return nil
+}
+
+func truncateAlertError(value string) string {
+	const maxAlertErrorBytes = 4096
+	if len(value) <= maxAlertErrorBytes {
+		return value
+	}
+	return value[:maxAlertErrorBytes]
 }
 
 type pgxScanner interface {
@@ -621,8 +733,9 @@ func scanIncidents(rows pgx.Rows) ([]Incident, error) {
 
 func scanIncident(row pgxScanner) (Incident, error) {
 	var (
-		incident   Incident
-		resolvedAt sql.NullTime
+		incident    Incident
+		resolvedAt  sql.NullTime
+		lastAlerted sql.NullTime
 	)
 	err := row.Scan(
 		&incident.ID,
@@ -633,6 +746,8 @@ func scanIncident(row pgxScanner) (Incident, error) {
 		&incident.LastFailureAt,
 		&resolvedAt,
 		&incident.LastError,
+		&lastAlerted,
+		&incident.AlertCount,
 		&incident.CreatedAt,
 		&incident.UpdatedAt,
 	)
@@ -642,10 +757,13 @@ func scanIncident(row pgxScanner) (Incident, error) {
 	if resolvedAt.Valid {
 		incident.ResolvedAt = resolvedAt.Time
 	}
+	if lastAlerted.Valid {
+		incident.LastAlertedAt = lastAlerted.Time
+	}
 	return incident, nil
 }
 
-func upsertIncident(ctx context.Context, tx pgx.Tx, record CheckRecord) error {
+func upsertIncidentAndAlert(ctx context.Context, tx pgx.Tx, record CheckRecord, monitor Monitor, alertPolicy AlertPolicy) error {
 	now := time.Now().UTC()
 	if record.Success {
 		_, err := tx.Exec(ctx, `
@@ -664,7 +782,12 @@ func upsertIncident(ctx context.Context, tx pgx.Tx, record CheckRecord) error {
 		lastError = fmt.Sprintf("unexpected status code %d", record.StatusCode)
 	}
 
-	_, err := tx.Exec(ctx, `
+	var (
+		incidentID   string
+		failureCount int
+		lastAlerted  sql.NullTime
+	)
+	err := tx.QueryRow(ctx, `
 		INSERT INTO incidents (
 			id, monitor_id, status, failure_count, first_failure_at, last_failure_at,
 			last_error, created_at, updated_at
@@ -676,7 +799,59 @@ func upsertIncident(ctx context.Context, tx pgx.Tx, record CheckRecord) error {
 			last_failure_at = EXCLUDED.last_failure_at,
 			last_error = EXCLUDED.last_error,
 			updated_at = EXCLUDED.updated_at
-	`, newID("inc"), record.MonitorID, incidentStatusOpen, record.CheckedAt.UTC(), lastError, now)
+		RETURNING id, failure_count, last_alerted_at
+	`, newID("inc"), record.MonitorID, incidentStatusOpen, record.CheckedAt.UTC(), lastError, now).Scan(
+		&incidentID,
+		&failureCount,
+		&lastAlerted,
+	)
+	if err != nil {
+		return err
+	}
+	if !alertPolicy.Enabled || failureCount < alertPolicy.FailureThreshold {
+		return nil
+	}
+	if lastAlerted.Valid && now.Sub(lastAlerted.Time) < alertPolicy.Cooldown {
+		return nil
+	}
+
+	payload := AlertPayload{
+		EventType:           alertEventIncidentFailure,
+		IncidentID:          incidentID,
+		MonitorID:           record.MonitorID,
+		URL:                 monitor.URL,
+		StatusCode:          record.StatusCode,
+		Error:               lastError,
+		ConsecutiveFailures: failureCount,
+		CheckedAt:           record.CheckedAt.UTC(),
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal alert outbox payload: %w", err)
+	}
+	idempotencyKey := incidentID + ":failure:" + strconv.Itoa(failureCount)
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO alert_outbox (
+			id, idempotency_key, incident_id, monitor_id, event_type, payload,
+			status, available_at, created_at, updated_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'pending', $7::timestamptz, $7::timestamptz, $7::timestamptz)
+		ON CONFLICT (idempotency_key) DO NOTHING
+	`, newID("alert"), idempotencyKey, incidentID, record.MonitorID, alertEventIncidentFailure, payloadJSON, now)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil
+	}
+
+	_, err = tx.Exec(ctx, `
+		UPDATE incidents
+		SET last_alerted_at = $2::timestamptz,
+			alert_count = alert_count + 1,
+			updated_at = $2::timestamptz
+		WHERE id = $1
+	`, incidentID, now)
 	return err
 }
 

@@ -9,48 +9,54 @@ import (
 )
 
 type Metrics struct {
-	mu                  sync.RWMutex
-	startedAt           time.Time
-	version             string
-	commit              string
-	buildDate           string
-	totalLinks          int
-	checksTotal         uint64
-	healthyTotal        uint64
-	unhealthyTotal      uint64
-	checkErrorsTotal    uint64
-	jobsScheduledTotal  uint64
-	jobsSkippedTotal    uint64
-	durationSumSeconds  float64
-	durationCount       uint64
-	lastCheckAt         time.Time
-	lastSuccessAt       time.Time
-	statusByURL         map[string]int
-	upByURL             map[string]bool
-	consecutiveFailures map[string]int
-	dependencyUp        map[string]bool
+	mu                   sync.RWMutex
+	startedAt            time.Time
+	version              string
+	commit               string
+	buildDate            string
+	totalLinks           int
+	checksTotal          uint64
+	healthyTotal         uint64
+	unhealthyTotal       uint64
+	checkErrorsTotal     uint64
+	jobsScheduledTotal   uint64
+	jobsSkippedTotal     uint64
+	alertsDeliveredTotal uint64
+	alertFailuresTotal   uint64
+	alertsDeadTotal      uint64
+	durationSumSeconds   float64
+	durationCount        uint64
+	lastCheckAt          time.Time
+	lastSuccessAt        time.Time
+	statusByURL          map[string]int
+	upByURL              map[string]bool
+	consecutiveFailures  map[string]int
+	dependencyUp         map[string]bool
 }
 
 type MetricsSnapshot struct {
-	StartedAt           time.Time
-	Version             string
-	Commit              string
-	BuildDate           string
-	TotalLinks          int
-	ChecksTotal         uint64
-	HealthyTotal        uint64
-	UnhealthyTotal      uint64
-	CheckErrorsTotal    uint64
-	JobsScheduledTotal  uint64
-	JobsSkippedTotal    uint64
-	DurationSumSeconds  float64
-	DurationCount       uint64
-	LastCheckAt         time.Time
-	LastSuccessAt       time.Time
-	StatusByURL         map[string]int
-	UpByURL             map[string]bool
-	ConsecutiveFailures map[string]int
-	DependencyUp        map[string]bool
+	StartedAt            time.Time
+	Version              string
+	Commit               string
+	BuildDate            string
+	TotalLinks           int
+	ChecksTotal          uint64
+	HealthyTotal         uint64
+	UnhealthyTotal       uint64
+	CheckErrorsTotal     uint64
+	JobsScheduledTotal   uint64
+	JobsSkippedTotal     uint64
+	AlertsDeliveredTotal uint64
+	AlertFailuresTotal   uint64
+	AlertsDeadTotal      uint64
+	DurationSumSeconds   float64
+	DurationCount        uint64
+	LastCheckAt          time.Time
+	LastSuccessAt        time.Time
+	StatusByURL          map[string]int
+	UpByURL              map[string]bool
+	ConsecutiveFailures  map[string]int
+	DependencyUp         map[string]bool
 }
 
 func NewMetrics(version, commit, buildDate string, totalLinks int) *Metrics {
@@ -83,6 +89,21 @@ func (m *Metrics) RecordSkipped() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.jobsSkippedTotal++
+}
+
+func (m *Metrics) RecordAlertDelivered() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.alertsDeliveredTotal++
+}
+
+func (m *Metrics) RecordAlertFailure(dead bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.alertFailuresTotal++
+	if dead {
+		m.alertsDeadTotal++
+	}
 }
 
 func (m *Metrics) SetDependencyUp(name string, up bool) {
@@ -127,25 +148,28 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 	defer m.mu.RUnlock()
 
 	return MetricsSnapshot{
-		StartedAt:           m.startedAt,
-		Version:             m.version,
-		Commit:              m.commit,
-		BuildDate:           m.buildDate,
-		TotalLinks:          m.totalLinks,
-		ChecksTotal:         m.checksTotal,
-		HealthyTotal:        m.healthyTotal,
-		UnhealthyTotal:      m.unhealthyTotal,
-		CheckErrorsTotal:    m.checkErrorsTotal,
-		JobsScheduledTotal:  m.jobsScheduledTotal,
-		JobsSkippedTotal:    m.jobsSkippedTotal,
-		DurationSumSeconds:  m.durationSumSeconds,
-		DurationCount:       m.durationCount,
-		LastCheckAt:         m.lastCheckAt,
-		LastSuccessAt:       m.lastSuccessAt,
-		StatusByURL:         cloneIntMap(m.statusByURL),
-		UpByURL:             cloneBoolMap(m.upByURL),
-		ConsecutiveFailures: cloneIntMap(m.consecutiveFailures),
-		DependencyUp:        cloneBoolMap(m.dependencyUp),
+		StartedAt:            m.startedAt,
+		Version:              m.version,
+		Commit:               m.commit,
+		BuildDate:            m.buildDate,
+		TotalLinks:           m.totalLinks,
+		ChecksTotal:          m.checksTotal,
+		HealthyTotal:         m.healthyTotal,
+		UnhealthyTotal:       m.unhealthyTotal,
+		CheckErrorsTotal:     m.checkErrorsTotal,
+		JobsScheduledTotal:   m.jobsScheduledTotal,
+		JobsSkippedTotal:     m.jobsSkippedTotal,
+		AlertsDeliveredTotal: m.alertsDeliveredTotal,
+		AlertFailuresTotal:   m.alertFailuresTotal,
+		AlertsDeadTotal:      m.alertsDeadTotal,
+		DurationSumSeconds:   m.durationSumSeconds,
+		DurationCount:        m.durationCount,
+		LastCheckAt:          m.lastCheckAt,
+		LastSuccessAt:        m.lastSuccessAt,
+		StatusByURL:          cloneIntMap(m.statusByURL),
+		UpByURL:              cloneBoolMap(m.upByURL),
+		ConsecutiveFailures:  cloneIntMap(m.consecutiveFailures),
+		DependencyUp:         cloneBoolMap(m.dependencyUp),
 	}
 }
 
@@ -187,6 +211,9 @@ func (m *Metrics) Prometheus() string {
 	writeMetric("site_checker_check_errors_total", "Total checks that returned an error.", "counter", snapshot.CheckErrorsTotal)
 	writeMetric("site_checker_jobs_scheduled_total", "Total jobs accepted by the scheduler.", "counter", snapshot.JobsScheduledTotal)
 	writeMetric("site_checker_jobs_skipped_total", "Total scheduler attempts skipped because the queue was full.", "counter", snapshot.JobsSkippedTotal)
+	writeMetric("site_checker_alerts_delivered_total", "Total webhook alerts delivered successfully.", "counter", snapshot.AlertsDeliveredTotal)
+	writeMetric("site_checker_alert_delivery_failures_total", "Total failed webhook alert delivery attempts.", "counter", snapshot.AlertFailuresTotal)
+	writeMetric("site_checker_alerts_dead_total", "Total webhook alerts exhausted after retry attempts.", "counter", snapshot.AlertsDeadTotal)
 	writeMetric("site_checker_check_duration_seconds_sum", "Total check duration in seconds.", "counter", snapshot.DurationSumSeconds)
 	writeMetric("site_checker_check_duration_seconds_count", "Number of observed check durations.", "counter", snapshot.DurationCount)
 	writeMetric("site_checker_started_timestamp_seconds", "Unix timestamp when the process started.", "gauge", unixSeconds(snapshot.StartedAt))

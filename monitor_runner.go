@@ -16,7 +16,6 @@ func RunMonitorScheduler(
 	store *MonitorStore,
 	checker *Checker,
 	metrics *Metrics,
-	alerts *AlertManager,
 	workerCount int,
 	logger *slog.Logger,
 ) {
@@ -27,7 +26,7 @@ func RunMonitorScheduler(
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			runMonitorWorker(ctx, workerID, jobs, store, checker, metrics, alerts, logger)
+			runMonitorWorker(ctx, workerID, jobs, store, checker, metrics, logger)
 		}(i)
 	}
 
@@ -71,7 +70,6 @@ func runMonitorWorker(
 	store *MonitorStore,
 	checker *Checker,
 	metrics *Metrics,
-	alerts *AlertManager,
 	logger *slog.Logger,
 ) {
 	for {
@@ -96,9 +94,6 @@ func runMonitorWorker(
 			}
 
 			metrics.RecordResult(result)
-			if alerts != nil {
-				alerts.Handle(ctx, result)
-			}
 		}
 	}
 }

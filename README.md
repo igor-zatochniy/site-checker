@@ -7,7 +7,7 @@ Site Checker is a backend monitoring platform written in Go. It manages website 
 ## Technology
 
 - Go 1.26, `net/http`, `log/slog`, goroutines, channels, and `context.Context`.
-- PostgreSQL with `pgxpool`, embedded SQL migrations, monitor history, and incidents.
+- PostgreSQL with `pgxpool`, embedded SQL migrations, monitor history, incidents, and a transactional alert outbox.
 - REST API with repository/service/handler separation and API key authentication.
 - OpenAPI contract in [`api/openapi.yaml`](api/openapi.yaml).
 - JobQueue abstraction with in-memory and RabbitMQ implementations.
@@ -15,7 +15,8 @@ Site Checker is a backend monitoring platform written in Go. It manages website 
 - Prometheus-compatible metrics on `/metrics`, health probes on `/healthz` and dependency-aware `/readyz`, optional pprof.
 - Docker multi-stage build with Alpine runtime.
 - GitHub Actions for tests, race detector, `go vet`, Staticcheck, govulncheck, Trivy scans, SBOM generation, integration tests, and container build.
-- Kubernetes manifests for API, Scheduler, Worker, PostgreSQL, RabbitMQ, NetworkPolicy, and optional KEDA queue-based worker scaling.
+- Persisted webhook alerting with transactional decisions, cross-replica cooldown, lease recovery, retry, and idempotency keys.
+- Kubernetes manifests for API, Scheduler, Worker, Alert Dispatcher, PostgreSQL, RabbitMQ, NetworkPolicy, and optional KEDA queue-based worker scaling.
 
 ## Architecture
 
@@ -25,6 +26,7 @@ The same binary can run as separate roles:
 APP_ROLE=api        REST API, OpenAPI, health, readiness, metrics
 APP_ROLE=scheduler  claims due monitors and publishes check jobs
 APP_ROLE=worker     consumes jobs and stores check results
+APP_ROLE=alert-dispatcher  delivers persisted webhook alerts
 APP_ROLE=all        local all-in-one mode
 ```
 
@@ -46,6 +48,8 @@ flowchart LR
   Rabbit --> Worker["Worker role x1-10"]
   Worker --> PG
   Worker --> Sites["External websites"]
+  PG --> AlertDispatcher["Alert Dispatcher role x1"]
+  AlertDispatcher --> Webhook["Alert webhook"]
   API --> Metrics["/metrics /healthz /readyz"]
   Scheduler --> Metrics
   Worker --> Metrics
@@ -55,6 +59,8 @@ flowchart LR
 
 - [OpenAPI YAML](api/openapi.yaml)
 - [Interactive API docs](https://igor-zatochniy.github.io/site-checker/)
+
+The interactive documentation loads the explicitly pinned Redoc 2.5.0 bundle.
 
 The running service also exposes it at:
 
@@ -120,6 +126,12 @@ Docker Compose mode:
 
 ```bash
 docker compose up --build
+```
+
+Enable the optional alert dispatcher after setting a webhook URL:
+
+```bash
+ALERT_WEBHOOK_URL='https://alerts.example.com/site-checker' docker compose --profile alerts up --build
 ```
 
 RabbitMQ Management UI is exposed on:
@@ -209,7 +221,13 @@ deploy/kubernetes/
 Apply:
 
 ```bash
-kubectl apply -f deploy/kubernetes/
+kubectl apply -k deploy/kubernetes/
+```
+
+The checked-in Kustomize base uses a fixed version tag and never uses `latest`. A `v*` Git tag publishes both the release tag and an immutable `sha-<commit>` tag to GHCR. CI also captures the pushed image digest and uploads a rendered Kubernetes manifest artifact whose application containers use `image@sha256:...`. Use that artifact for production releases:
+
+```bash
+kubectl apply -f site-checker-kubernetes-vX.Y.Z.yaml
 ```
 
 The Kubernetes setup demonstrates:
@@ -217,6 +235,7 @@ The Kubernetes setup demonstrates:
 - API deployment with 2 replicas.
 - Scheduler deployment with 1 replica.
 - Worker deployment with 3 replicas.
+- Alert Dispatcher deployment with 1 replica.
 - PostgreSQL and RabbitMQ demo deployments.
 - Optional KEDA `ScaledObject` for RabbitMQ queue-length scaling from 1 to 10 workers.
 - NetworkPolicy default-deny baseline with explicit DNS, PostgreSQL, RabbitMQ, and HTTP/HTTPS egress.
@@ -244,18 +263,19 @@ Expected demonstration:
 
 ## Engineering trade-offs
 
-- The service keeps one binary and selects behavior through `APP_ROLE`. This keeps deployment artifacts simple while still allowing API, Scheduler, and Worker roles to scale independently.
+- The service keeps one binary and selects behavior through `APP_ROLE`. This keeps deployment artifacts simple while still allowing API, Scheduler, Worker, and Alert Dispatcher roles to scale independently.
 - The repository and queue interfaces support both local in-memory mode and production PostgreSQL/RabbitMQ mode. In-memory mode is fast for development, but PostgreSQL and RabbitMQ are the durable path for multi-replica deployments.
 - Scheduler and worker coordination uses explicit job IDs, monitor pending state, stale lease recovery, and RabbitMQ ack/nack semantics. This avoids duplicate persisted results and prevents stale queued jobs from creating repeated external HTTP checks.
 - SSRF protection is implemented in application code and reinforced by Kubernetes NetworkPolicy. Application-level checks give portable behavior; network policy adds defense in depth in clusters.
-- Alerts are currently lightweight webhook notifications. Incident history is persisted, but a full alert outbox with retry and cross-replica cooldown is a later hardening step.
+- A check result, incident transition, cooldown decision, and alert outbox insert share one PostgreSQL transaction. Webhook delivery is intentionally at-least-once; a stable `Idempotency-Key` lets receivers deduplicate the rare retry after an ambiguous network outcome.
 - Built-in demo URLs are opt-in. Normal deployments start with an empty monitor set to avoid sending unintended traffic to third-party websites.
+- RabbitMQ publication and consumption recover from runtime connection loss with bounded exponential backoff. Delivery remains at-least-once because a connection can fail after the broker accepted a publish or acknowledgement; persisted job IDs and processing leases make those retry windows safe.
+- Kubernetes source manifests use a fixed readable tag for local rendering, while release CI produces a digest-pinned deployment bundle so production rollouts reference immutable image content.
 
 ## Known limitations
 
 - The in-memory repository and queue are intended for local development and tests, not durable production use.
-- RabbitMQ reconnect is fail-fast today: if the consumer channel stops unexpectedly, the worker process exits so an orchestrator can restart it. Automatic reconnect with exponential backoff is a future improvement.
-- Webhook alert delivery does not yet use a persisted outbox, so retry/cooldown behavior is best-effort in multi-worker deployments.
+- Webhook receivers should honor `Idempotency-Key` because no distributed system can guarantee exactly-once delivery across a database commit and an external HTTP endpoint.
 - PostgreSQL and RabbitMQ Kubernetes manifests are suitable for local or demonstration clusters. Production deployments should use managed services or hardened StatefulSets with backups, persistence, TLS, monitoring, and secret rotation.
 - KEDA queue-based scaling requires the KEDA operator to be installed separately.
 - The project exposes Prometheus-format metrics, but alert rules and dashboards are intentionally left environment-specific.
@@ -265,13 +285,16 @@ Expected demonstration:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `APP_ENV` | `production` | Runtime environment label. `demo` enables built-in demo seed links. |
-| `APP_ROLE` | `all` | Runtime role: `all`, `api`, `scheduler`, or `worker`. |
+| `APP_ROLE` | `all` | Runtime role: `all`, `api`, `scheduler`, `worker`, or `alert-dispatcher`. |
 | `STORAGE_TYPE` | `memory` or `postgres` when `DATABASE_URL` is set | Storage backend. |
 | `DATABASE_URL` | empty | PostgreSQL connection string. Required for `STORAGE_TYPE=postgres`. |
 | `RUN_MIGRATIONS` | `true` | Runs embedded SQL migrations on startup. |
 | `API_KEY` | empty | Enables REST API key authentication when set. |
 | `QUEUE_TYPE` | `memory` or `rabbitmq` when `RABBITMQ_URL` is set | Job queue backend. |
 | `RABBITMQ_URL` | empty | RabbitMQ AMQP URL. Required for `QUEUE_TYPE=rabbitmq`. |
+| `RABBITMQ_CONNECT_TIMEOUT` | `5s` | Timeout for one RabbitMQ TCP and protocol connection attempt. |
+| `RABBITMQ_RECONNECT_INITIAL_BACKOFF` | `1s` | Initial delay before retrying a failed RabbitMQ connection or consumer session. |
+| `RABBITMQ_RECONNECT_MAX_BACKOFF` | `30s` | Maximum RabbitMQ reconnect delay. |
 | `QUEUE_NAME` | `site_checker.checks` | Main check job queue. |
 | `DEAD_LETTER_QUEUE_NAME` | `site_checker.checks.dead` | RabbitMQ dead-letter queue. |
 | `QUEUE_BUFFER_SIZE` | `1000` | In-memory queue buffer size. |
@@ -293,9 +316,16 @@ Expected demonstration:
 | `ALLOWED_PORTS` | `80,443` | Allowed outbound destination ports. |
 | `ALLOW_PRIVATE_NETWORKS` | `false` | Allows private, loopback, and link-local networks when explicitly enabled. |
 | `ALLOW_PROXY_ENV` | `false` | Allows proxy settings from the environment when explicitly enabled. |
-| `ALERT_WEBHOOK_URL` | empty | Optional webhook URL for failure alerts. |
-| `ALERT_FAILURE_THRESHOLD` | `3` | Consecutive failures before sending an alert. |
-| `ALERT_COOLDOWN` | `10m` | Minimum time between alerts for the same URL. |
+| `ALERT_WEBHOOK_URL` | empty | Optional webhook URL for persisted failure alerts. Requires PostgreSQL. |
+| `ALERT_FAILURE_THRESHOLD` | `3` | Consecutive incident failures before creating an outbox event. |
+| `ALERT_COOLDOWN` | `10m` | Database-enforced minimum time between alert events for one incident. |
+| `ALERT_DISPATCH_INTERVAL` | `1s` | Poll interval when no immediately available outbox batch remains. |
+| `ALERT_DISPATCH_BATCH_SIZE` | `50` | Maximum outbox events claimed and delivered concurrently per batch. |
+| `ALERT_LEASE_TIMEOUT` | `30s` | Reclaims alert events abandoned by a stopped dispatcher. |
+| `ALERT_DELIVERY_TIMEOUT` | `5s` | Timeout for one webhook delivery attempt. |
+| `ALERT_MAX_ATTEMPTS` | `8` | Delivery attempts before an outbox event is marked `dead`. |
+| `ALERT_RETRY_INITIAL_BACKOFF` | `1s` | Initial persisted retry delay. |
+| `ALERT_RETRY_MAX_BACKOFF` | `5m` | Maximum persisted retry delay. |
 | `USER_AGENT` | `site-checker` | User-Agent used for checks. |
 | `ENABLE_PPROF` | `false` | Enables `/debug/pprof/` endpoints. |
 | `READINESS_STALE_AFTER` | `CHECK_INTERVAL*3 + HTTP_TIMEOUT` | Marks readiness unhealthy if checks are stale. |
