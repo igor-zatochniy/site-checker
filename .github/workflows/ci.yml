@@ -117,7 +117,7 @@ jobs:
 
       - name: Set up kubectl
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: azure/setup-kubectl@v4
+        uses: azure/setup-kubectl@v5
         with:
           version: v1.32.2
 
