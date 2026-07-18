@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -46,13 +47,13 @@ func (h *APIHandler) Register(mux *http.ServeMux) {
 func (h *APIHandler) createMonitor(w http.ResponseWriter, r *http.Request) {
 	var input MonitorInput
 	if err := decodeJSON(r, &input); err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		h.writeRequestError(w, r, http.StatusBadRequest, "invalid_json", "request body must be valid JSON", err)
 		return
 	}
 
 	monitor, err := h.service.Create(r.Context(), input)
 	if err != nil {
-		h.writeStoreError(w, err)
+		h.writeStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, monitor)
@@ -61,13 +62,13 @@ func (h *APIHandler) createMonitor(w http.ResponseWriter, r *http.Request) {
 func (h *APIHandler) listMonitors(w http.ResponseWriter, r *http.Request) {
 	offset, limit, err := pagination(r)
 	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_pagination", err.Error())
+		h.writeRequestError(w, r, http.StatusBadRequest, "invalid_pagination", "pagination parameters are invalid", err)
 		return
 	}
 
 	items, total, err := h.service.List(r.Context(), offset, limit)
 	if err != nil {
-		h.writeStoreError(w, err)
+		h.writeStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -81,7 +82,7 @@ func (h *APIHandler) listMonitors(w http.ResponseWriter, r *http.Request) {
 func (h *APIHandler) getMonitor(w http.ResponseWriter, r *http.Request) {
 	monitor, err := h.service.Get(r.Context(), r.PathValue("id"))
 	if err != nil {
-		h.writeStoreError(w, err)
+		h.writeStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, monitor)
@@ -90,13 +91,13 @@ func (h *APIHandler) getMonitor(w http.ResponseWriter, r *http.Request) {
 func (h *APIHandler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 	var patch MonitorPatch
 	if err := decodeJSON(r, &patch); err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		h.writeRequestError(w, r, http.StatusBadRequest, "invalid_json", "request body must be valid JSON", err)
 		return
 	}
 
 	monitor, err := h.service.Update(r.Context(), r.PathValue("id"), patch)
 	if err != nil {
-		h.writeStoreError(w, err)
+		h.writeStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, monitor)
@@ -105,7 +106,7 @@ func (h *APIHandler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 func (h *APIHandler) deleteMonitor(w http.ResponseWriter, r *http.Request) {
 	err := h.service.Delete(r.Context(), r.PathValue("id"))
 	if err != nil {
-		h.writeStoreError(w, err)
+		h.writeStoreError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -114,13 +115,13 @@ func (h *APIHandler) deleteMonitor(w http.ResponseWriter, r *http.Request) {
 func (h *APIHandler) listChecks(w http.ResponseWriter, r *http.Request) {
 	offset, limit, err := pagination(r)
 	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_pagination", err.Error())
+		h.writeRequestError(w, r, http.StatusBadRequest, "invalid_pagination", "pagination parameters are invalid", err)
 		return
 	}
 
 	items, total, err := h.service.ListChecks(r.Context(), r.PathValue("id"), offset, limit)
 	if err != nil {
-		h.writeStoreError(w, err)
+		h.writeStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -134,16 +135,16 @@ func (h *APIHandler) listChecks(w http.ResponseWriter, r *http.Request) {
 func (h *APIHandler) runManualCheck(w http.ResponseWriter, r *http.Request) {
 	record, err := h.service.RunManualCheck(r.Context(), r.PathValue("id"))
 	if err != nil {
-		h.writeStoreError(w, err)
+		h.writeStoreError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, record)
+	writeJSON(w, http.StatusOK, record)
 }
 
 func (h *APIHandler) getStats(w http.ResponseWriter, r *http.Request) {
 	stats, err := h.service.Stats(r.Context(), r.PathValue("id"))
 	if err != nil {
-		h.writeStoreError(w, err)
+		h.writeStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
@@ -152,14 +153,14 @@ func (h *APIHandler) getStats(w http.ResponseWriter, r *http.Request) {
 func (h *APIHandler) listIncidents(w http.ResponseWriter, r *http.Request) {
 	offset, limit, err := pagination(r)
 	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_pagination", err.Error())
+		h.writeRequestError(w, r, http.StatusBadRequest, "invalid_pagination", "pagination parameters are invalid", err)
 		return
 	}
 
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	items, total, err := h.service.ListIncidents(r.Context(), status, offset, limit)
 	if err != nil {
-		h.writeStoreError(w, err)
+		h.writeStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -199,15 +200,50 @@ func (h *APIHandler) validAPIKey(r *http.Request) bool {
 	return false
 }
 
-func (h *APIHandler) writeStoreError(w http.ResponseWriter, err error) {
+func (h *APIHandler) writeRequestError(w http.ResponseWriter, r *http.Request, statusCode int, code, message string, err error) {
+	h.logAPIError(r, statusCode, code, err)
+	writeAPIError(w, statusCode, code, message)
+}
+
+func (h *APIHandler) writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
+	statusCode, code, message := mapAPIError(err)
+	h.logAPIError(r, statusCode, code, err)
+	writeAPIError(w, statusCode, code, message)
+}
+
+func mapAPIError(err error) (int, string, string) {
 	switch {
 	case errors.Is(err, ErrMonitorNotFound):
-		writeAPIError(w, http.StatusNotFound, "monitor_not_found", "monitor not found")
+		return http.StatusNotFound, "monitor_not_found", "monitor not found"
 	case errors.Is(err, ErrMonitorExists):
-		writeAPIError(w, http.StatusConflict, "monitor_exists", "monitor already exists")
+		return http.StatusConflict, "monitor_exists", "monitor already exists"
+	case errors.Is(err, ErrInvalidMonitor):
+		return http.StatusBadRequest, "invalid_monitor", "monitor request is invalid"
+	case errors.Is(err, ErrQueueFull), errors.Is(err, ErrQueueConsumerClosed):
+		return http.StatusServiceUnavailable, "queue_unavailable", "check queue is unavailable"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return http.StatusServiceUnavailable, "service_unavailable", "service is temporarily unavailable"
 	default:
-		writeAPIError(w, http.StatusBadRequest, "invalid_monitor", err.Error())
+		return http.StatusInternalServerError, "internal_error", "internal server error"
 	}
+}
+
+func (h *APIHandler) logAPIError(r *http.Request, statusCode int, code string, err error) {
+	if err == nil || h.logger == nil {
+		return
+	}
+	args := []any{
+		"method", r.Method,
+		"path", r.URL.Path,
+		"status", statusCode,
+		"code", code,
+		"error", err,
+	}
+	if statusCode >= http.StatusInternalServerError {
+		h.logger.Error("API request failed", args...)
+		return
+	}
+	h.logger.Warn("API request rejected", args...)
 }
 
 func decodeJSON(r *http.Request, target any) error {

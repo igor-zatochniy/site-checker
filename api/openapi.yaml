@@ -130,8 +130,8 @@ paths:
       summary: Run manual check
       operationId: runManualCheck
       responses:
-        "202":
-          description: Check completed and stored
+        "200":
+          description: Synchronous check completed and stored
           content:
             application/json:
               schema:

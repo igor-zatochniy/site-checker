@@ -2,11 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -86,6 +91,99 @@ func TestAPIReturnsValidationError(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
+	defer resp.Body.Close()
+
+	var apiErr map[string]any
+	decodeResponse(t, resp, &apiErr)
+	if msg, _ := apiErr["error"].(map[string]any)["message"].(string); strings.Contains(msg, "127.0.0.1") {
+		t.Fatalf("validation message leaked internal detail: %q", msg)
+	}
+}
+
+func TestAPIRunManualCheckReturnsOK(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer target.Close()
+
+	targetURL, err := http.NewRequest(http.MethodGet, target.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, port, err := net.SplitHostPort(targetURL.URL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = host
+	portNum, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testCheckerConfig(t)
+	cfg.AllowPrivateNetworks = true
+	cfg.AllowedPorts = map[int]struct{}{portNum: {}}
+	policy := NewNetworkPolicy(cfg)
+	store := NewMonitorStore(policy)
+	metrics := NewMetrics("test", "commit", "date", 0)
+	checker := NewChecker(target.Client(), cfg, metrics)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	service := NewMonitorService(NewInMemoryMonitorRepositoryFromStore(store), checker, metrics, AlertPolicy{}, logger)
+	handler := NewAPIHandler(service, "", logger)
+
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	createBody := `{"url":"` + target.URL + `","interval_seconds":60,"timeout_seconds":5,"expected_status":200}`
+	resp := apiRequest(t, server.URL+"/api/v1/monitors", http.MethodPost, createBody)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201", resp.StatusCode)
+	}
+	var created Monitor
+	decodeResponse(t, resp, &created)
+	resp.Body.Close()
+
+	resp = apiRequest(t, server.URL+"/api/v1/monitors/"+created.ID+"/check", http.MethodPost, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("manual check status = %d, want 200", resp.StatusCode)
+	}
+	var record CheckRecord
+	decodeResponse(t, resp, &record)
+	if !record.Success {
+		t.Fatalf("manual check success = false, record = %+v", record)
+	}
+}
+
+func TestAPIReturnsSafeInternalError(t *testing.T) {
+	loggerBuf := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(loggerBuf, nil))
+	service := NewMonitorService(failingMonitorRepository{err: errors.New("connection refused")}, nil, NewMetrics("test", "commit", "date", 0), AlertPolicy{}, logger)
+	handler := NewAPIHandler(service, "", logger)
+
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp := apiRequest(t, server.URL+"/api/v1/monitors", http.MethodGet, "")
+	if resp.StatusCode != http.StatusInternalServerError && resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 500 or 503", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "connection refused") {
+		t.Fatalf("response leaked internal error: %s", body)
+	}
+	if !strings.Contains(loggerBuf.String(), "connection refused") {
+		t.Fatalf("server log did not capture internal error: %s", loggerBuf.String())
+	}
 }
 
 func TestAPIRequiresAPIKeyWhenConfigured(t *testing.T) {
@@ -149,4 +247,56 @@ func decodeResponse(t *testing.T, resp *http.Response, target any) {
 	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
 		t.Fatal(err)
 	}
+}
+
+type failingMonitorRepository struct {
+	err error
+}
+
+func (r failingMonitorRepository) Ping(context.Context) error { return r.err }
+
+func (r failingMonitorRepository) Count(context.Context) (int, error) { return 0, r.err }
+
+func (r failingMonitorRepository) Create(context.Context, MonitorInput) (Monitor, error) {
+	return Monitor{}, r.err
+}
+
+func (r failingMonitorRepository) List(context.Context, int, int) ([]Monitor, int, error) {
+	return nil, 0, r.err
+}
+
+func (r failingMonitorRepository) Get(context.Context, string) (Monitor, error) {
+	return Monitor{}, r.err
+}
+
+func (r failingMonitorRepository) Update(context.Context, string, MonitorPatch) (Monitor, error) {
+	return Monitor{}, r.err
+}
+
+func (r failingMonitorRepository) Delete(context.Context, string) error { return r.err }
+
+func (r failingMonitorRepository) ClaimDue(context.Context, int, time.Time, time.Duration) ([]Monitor, error) {
+	return nil, r.err
+}
+
+func (r failingMonitorRepository) MarkProcessing(context.Context, string, string, time.Time, time.Duration) error {
+	return r.err
+}
+
+func (r failingMonitorRepository) AddCheck(context.Context, CheckRecord, AlertPolicy) (Monitor, error) {
+	return Monitor{}, r.err
+}
+
+func (r failingMonitorRepository) CompleteWithoutRecord(context.Context, string) error { return r.err }
+
+func (r failingMonitorRepository) ListChecks(context.Context, string, int, int) ([]CheckRecord, int, error) {
+	return nil, 0, r.err
+}
+
+func (r failingMonitorRepository) Stats(context.Context, string) (MonitorStats, error) {
+	return MonitorStats{}, r.err
+}
+
+func (r failingMonitorRepository) ListIncidents(context.Context, string, int, int) ([]Incident, int, error) {
+	return nil, 0, r.err
 }

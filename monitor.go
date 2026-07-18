@@ -14,6 +14,7 @@ import (
 var (
 	ErrMonitorNotFound      = errors.New("monitor not found")
 	ErrMonitorExists        = errors.New("monitor already exists")
+	ErrInvalidMonitor       = errors.New("invalid monitor")
 	ErrDuplicateJob         = errors.New("check job already processed")
 	ErrStaleJob             = errors.New("check job is no longer active")
 	ErrJobAlreadyProcessing = errors.New("check job is already processing")
@@ -583,22 +584,22 @@ func (s *MonitorStore) Stats(id string) (MonitorStats, error) {
 
 func validateMonitorInput(input MonitorInput, policy *NetworkPolicy) error {
 	if input.URL == "" {
-		return fmt.Errorf("url is required")
+		return fmt.Errorf("%w: url is required", ErrInvalidMonitor)
 	}
 	if _, err := url.ParseRequestURI(input.URL); err != nil {
-		return fmt.Errorf("url is invalid")
+		return fmt.Errorf("%w: url is invalid", ErrInvalidMonitor)
 	}
 	if err := policy.ValidateURL(input.URL); err != nil {
-		return fmt.Errorf("url is not allowed: %w", err)
+		return fmt.Errorf("%w: url is not allowed: %v", ErrInvalidMonitor, err)
 	}
 	if input.IntervalSeconds < 30 || input.IntervalSeconds > 86400 {
-		return fmt.Errorf("interval_seconds must be between 30 and 86400")
+		return fmt.Errorf("%w: interval_seconds must be between 30 and 86400", ErrInvalidMonitor)
 	}
 	if input.TimeoutSeconds < 1 || input.TimeoutSeconds > 60 {
-		return fmt.Errorf("timeout_seconds must be between 1 and 60")
+		return fmt.Errorf("%w: timeout_seconds must be between 1 and 60", ErrInvalidMonitor)
 	}
 	if input.ExpectedStatus < 100 || input.ExpectedStatus > 599 {
-		return fmt.Errorf("expected_status must be between 100 and 599")
+		return fmt.Errorf("%w: expected_status must be between 100 and 599", ErrInvalidMonitor)
 	}
 	return nil
 }
