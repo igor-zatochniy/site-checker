@@ -24,6 +24,7 @@ bin/
 .env.local
 .env.*.local
 config.local.json
+deploy/kubernetes/secret.yaml
 
 # Не ігноруємо шаблон середовища (якщо його буде створено в майбутньому)
 !.env.example

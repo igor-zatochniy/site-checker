@@ -2,16 +2,16 @@ services:
   postgres:
     image: postgres:17-alpine
     environment:
-      POSTGRES_DB: site_checker
-      POSTGRES_USER: site_checker
-      POSTGRES_PASSWORD: site_checker
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       PGDATA: /var/lib/postgresql/data/pgdata
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U site_checker -d site_checker"]
+      test: ["CMD-SHELL", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -19,11 +19,11 @@ services:
   rabbitmq:
     image: rabbitmq:4-management-alpine
     environment:
-      RABBITMQ_DEFAULT_USER: site_checker
-      RABBITMQ_DEFAULT_PASS: site_checker
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
@@ -33,17 +33,17 @@ services:
   api:
     build: .
     environment:
-      APP_ENV: production
+      APP_ENV: ${APP_ENV:-local}
       APP_ROLE: api
       STORAGE_TYPE: postgres
-      DATABASE_URL: postgres://site_checker:site_checker@postgres:5432/site_checker?sslmode=disable
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
       QUEUE_TYPE: rabbitmq
-      RABBITMQ_URL: amqp://site_checker:site_checker@rabbitmq:5672/
-      API_KEY: change-me
+      RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/"
+      API_KEY: ${API_KEY}
       ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL:-}"
       HEALTH_ADDR: :8080
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -53,14 +53,14 @@ services:
   scheduler:
     build: .
     environment:
-      APP_ENV: production
+      APP_ENV: ${APP_ENV:-local}
       APP_ROLE: scheduler
       STORAGE_TYPE: postgres
-      DATABASE_URL: postgres://site_checker:site_checker@postgres:5432/site_checker?sslmode=disable
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
       QUEUE_TYPE: rabbitmq
-      RABBITMQ_URL: amqp://site_checker:site_checker@rabbitmq:5672/
-      SEED_DEFAULT_LINKS: "false"
-      SEED_URLS_FILE: ""
+      RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/"
+      SEED_DEFAULT_LINKS: ${SEED_DEFAULT_LINKS:-false}
+      SEED_URLS_FILE: ${SEED_URLS_FILE:-}
       HEALTH_ADDR: :8080
     depends_on:
       postgres:
@@ -71,12 +71,12 @@ services:
   worker:
     build: .
     environment:
-      APP_ENV: production
+      APP_ENV: ${APP_ENV:-local}
       APP_ROLE: worker
       STORAGE_TYPE: postgres
-      DATABASE_URL: postgres://site_checker:site_checker@postgres:5432/site_checker?sslmode=disable
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
       QUEUE_TYPE: rabbitmq
-      RABBITMQ_URL: amqp://site_checker:site_checker@rabbitmq:5672/
+      RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/"
       WORKER_COUNT: "5"
       ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL:-}"
       HEALTH_ADDR: :8080
@@ -90,10 +90,10 @@ services:
     profiles: ["alerts"]
     build: .
     environment:
-      APP_ENV: production
+      APP_ENV: ${APP_ENV:-local}
       APP_ROLE: alert-dispatcher
       STORAGE_TYPE: postgres
-      DATABASE_URL: postgres://site_checker:site_checker@postgres:5432/site_checker?sslmode=disable
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
       ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL:-}"
       ALERT_FAILURE_THRESHOLD: "3"
       ALERT_COOLDOWN: 10m

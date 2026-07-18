@@ -125,6 +125,7 @@ go run .
 Docker Compose mode:
 
 ```bash
+cp .env.example .env
 docker compose up --build
 ```
 
@@ -355,7 +356,7 @@ APP_ENV=demo go run .
 
 By default, Site Checker blocks private networks, loopback addresses, link-local ranges, metadata IPs such as `169.254.169.254`, unsupported schemes, userinfo in URLs, unexpected ports, unsafe redirects, and environment proxies. Enable overrides only for trusted internal deployments.
 
-Kubernetes `secret.yaml` contains local-demo placeholder values. Production deployments should use External Secrets Operator, SOPS, Sealed Secrets, or a managed secret store with rotation.
+`deploy/kubernetes/secret.example.yaml` is a template only. Keep a real `deploy/kubernetes/secret.yaml` untracked or use External Secrets Operator, SOPS, Sealed Secrets, or a managed secret store with rotation.
 
 ## License
 

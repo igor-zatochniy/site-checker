@@ -10,8 +10,10 @@ This directory contains a split backend-platform deployment for Site Checker:
 - RabbitMQ demo deployment for check jobs and dead-letter handling.
 - Optional KEDA scaling by RabbitMQ queue length.
 - NetworkPolicy default-deny baseline with explicit ingress and egress allowances.
-- ConfigMap, Secret, Services, probes, resource requests and limits.
+- ConfigMap, Services, probes, resource requests and limits.
 - Non-root containers, dropped Linux capabilities, rolling updates, and graceful termination.
+
+The repository includes `secret.example.yaml` as a template only. Create an untracked `secret.yaml` from it, or use External Secrets / SOPS / Sealed Secrets, before applying the base.
 
 Apply locally:
 
