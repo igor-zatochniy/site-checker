@@ -317,6 +317,63 @@ func (r *PostgresMonitorRepository) MarkProcessing(ctx context.Context, id, jobI
 	return ErrJobAlreadyProcessing
 }
 
+func (r *PostgresMonitorRepository) MarkQueued(ctx context.Context, id, jobID string, now time.Time) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE monitors
+		SET pending = true,
+			pending_since = NULL,
+			pending_job_id = $2,
+			updated_at = $3::timestamptz
+		WHERE id = $1
+			AND pending = true
+			AND pending_job_id = $2
+	`, id, jobID, now.UTC())
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+
+	var exists bool
+	if err := r.pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM monitors WHERE id = $1)", id).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return ErrMonitorNotFound
+	}
+	return ErrStaleJob
+}
+
+func (r *PostgresMonitorRepository) FailProcessing(ctx context.Context, id, jobID string, nextCheckAt time.Time) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE monitors
+		SET pending = false,
+			pending_since = NULL,
+			pending_job_id = NULL,
+			next_check_at = $3::timestamptz,
+			updated_at = $4::timestamptz
+		WHERE id = $1
+			AND pending = true
+			AND pending_job_id = $2
+	`, id, jobID, nextCheckAt.UTC(), nextCheckAt.UTC())
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+
+	var exists bool
+	if err := r.pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM monitors WHERE id = $1)", id).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return ErrMonitorNotFound
+	}
+	return ErrStaleJob
+}
+
 func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRecord, alertPolicy AlertPolicy) (Monitor, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {

@@ -112,6 +112,38 @@ func TestMonitorStoreAllowsOnlyOneWorkerToProcessActiveJob(t *testing.T) {
 	}
 }
 
+func TestMonitorStoreMovesJobBackToQueuedBeforeRetry(t *testing.T) {
+	cfg := testCheckerConfig(t)
+	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}
+	store := NewMonitorStore(NewNetworkPolicy(cfg))
+
+	monitor, err := store.Create(MonitorInput{
+		URL:             "https://example.com",
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	claimed := store.ClaimDueWithLease(10, now, time.Minute)
+	if len(claimed) != 1 || claimed[0].ID != monitor.ID {
+		t.Fatalf("claimed = %+v, want monitor %s", claimed, monitor.ID)
+	}
+	jobID := NewCheckJobID(monitor.ID, monitor.NextCheckAt)
+	if err := store.MarkProcessing(monitor.ID, jobID, now.Add(10*time.Second), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkQueued(monitor.ID, jobID, now.Add(11*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkProcessing(monitor.ID, jobID, now.Add(12*time.Second), time.Minute); err != nil {
+		t.Fatalf("requeued MarkProcessing error = %v", err)
+	}
+}
+
 func TestMonitorStoreBoundsProcessedJobIDs(t *testing.T) {
 	cfg := testCheckerConfig(t)
 	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}

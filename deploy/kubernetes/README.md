@@ -13,12 +13,13 @@ This directory contains a split backend-platform deployment for Site Checker:
 - ConfigMap, Services, probes, resource requests and limits.
 - Non-root containers, dropped Linux capabilities, rolling updates, and graceful termination.
 
-The repository includes `secret.example.yaml` as a template only. Create an untracked `secret.yaml` from it, or use External Secrets / SOPS / Sealed Secrets, before applying the base.
+The repository includes `secret.example.yaml` as a template only. Copy it to an untracked local overlay Secret before applying local manifests. The checked-in base stays secret-free so CI can render release artifacts and production deployments can provide secrets through External Secrets, SOPS, Sealed Secrets, or a managed secret store.
 
 Apply locally:
 
 ```bash
-kubectl apply -k deploy/kubernetes/
+cp deploy/kubernetes/secret.example.yaml deploy/kubernetes/local/secret.yaml
+kubectl apply -k deploy/kubernetes/local/
 ```
 
 The Kustomize base contains a fixed image tag and never uses `latest`. For every `v*` Git tag, CI pushes the release image, records its registry digest, and uploads a rendered manifest named `site-checker-kubernetes-vX.Y.Z.yaml`. Production deployments should apply that artifact because all Site Checker roles reference the immutable `image@sha256:...` value:
@@ -58,7 +59,7 @@ Expected behavior:
 
 The included PostgreSQL and RabbitMQ manifests are suitable for local demonstration. For production, prefer managed PostgreSQL and RabbitMQ or hardened StatefulSets with backups, persistence, TLS, monitoring, and secret rotation.
 
-The included `Secret` uses local-demo placeholder values. Production deployments should use External Secrets Operator, SOPS, Sealed Secrets, or a managed secret store.
+The included `secret.example.yaml` uses local-demo placeholder values only. Production deployments should use External Secrets Operator, SOPS, Sealed Secrets, or a managed secret store.
 
 Set `ALERT_WEBHOOK_URL` in the managed secret to enable transactional webhook alerts. When it is empty, workers do not create alert events and the dispatcher remains idle.
 

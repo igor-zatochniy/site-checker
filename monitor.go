@@ -374,6 +374,45 @@ func (s *MonitorStore) MarkProcessing(id, jobID string, now time.Time, leaseTime
 	return nil
 }
 
+func (s *MonitorStore) MarkQueued(id, jobID string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.byID[id]; !exists {
+		return ErrMonitorNotFound
+	}
+
+	state, exists := s.pending[id]
+	if !exists || state.jobID != jobID {
+		return ErrStaleJob
+	}
+	state.processingSince = time.Time{}
+	state.queuedAt = now.UTC()
+	s.pending[id] = state
+	return nil
+}
+
+func (s *MonitorStore) FailProcessing(id, jobID string, nextCheckAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	monitor, exists := s.byID[id]
+	if !exists {
+		return ErrMonitorNotFound
+	}
+
+	state, exists := s.pending[id]
+	if !exists || state.jobID != jobID {
+		return ErrStaleJob
+	}
+	delete(s.pending, id)
+
+	monitor.NextCheckAt = nextCheckAt.UTC()
+	monitor.UpdatedAt = nextCheckAt.UTC()
+	s.byID[id] = monitor
+	return nil
+}
+
 func (s *MonitorStore) AddCheck(record CheckRecord) (Monitor, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

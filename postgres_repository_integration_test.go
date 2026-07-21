@@ -91,6 +91,12 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if err := repo.MarkProcessing(ctx, monitor.ID, jobID, now.Add(2*time.Minute), time.Minute); err != nil {
 		t.Fatal(err)
 	}
+	if err := repo.MarkQueued(ctx, monitor.ID, jobID, now.Add(2*time.Minute+time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.MarkProcessing(ctx, monitor.ID, jobID, now.Add(2*time.Minute+2*time.Second), time.Minute); err != nil {
+		t.Fatal(err)
+	}
 
 	record := CheckRecord{
 		ID:         newID("chk"),

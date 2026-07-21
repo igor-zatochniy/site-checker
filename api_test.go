@@ -146,6 +146,13 @@ func TestAPIRunManualCheckReturnsOK(t *testing.T) {
 	decodeResponse(t, resp, &created)
 	resp.Body.Close()
 
+	now := time.Now().UTC()
+	claimed := store.ClaimDueWithLease(1, now, 2*time.Minute)
+	if len(claimed) != 1 {
+		t.Fatalf("claimed due monitors = %d, want 1", len(claimed))
+	}
+	scheduledJobID := NewCheckJobID(created.ID, created.NextCheckAt)
+
 	resp = apiRequest(t, server.URL+"/api/v1/monitors/"+created.ID+"/check", http.MethodPost, "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("manual check status = %d, want 200", resp.StatusCode)
@@ -154,6 +161,12 @@ func TestAPIRunManualCheckReturnsOK(t *testing.T) {
 	decodeResponse(t, resp, &record)
 	if !record.Success {
 		t.Fatalf("manual check success = false, record = %+v", record)
+	}
+	if record.JobID == "" {
+		t.Fatal("manual check job_id is empty")
+	}
+	if err := store.MarkProcessing(created.ID, scheduledJobID, now.Add(time.Second), 2*time.Minute); err != nil {
+		t.Fatalf("scheduled lease was cleared by manual check: %v", err)
 	}
 }
 
@@ -280,6 +293,14 @@ func (r failingMonitorRepository) ClaimDue(context.Context, int, time.Time, time
 }
 
 func (r failingMonitorRepository) MarkProcessing(context.Context, string, string, time.Time, time.Duration) error {
+	return r.err
+}
+
+func (r failingMonitorRepository) MarkQueued(context.Context, string, string, time.Time) error {
+	return r.err
+}
+
+func (r failingMonitorRepository) FailProcessing(context.Context, string, string, time.Time) error {
 	return r.err
 }
 

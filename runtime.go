@@ -208,7 +208,18 @@ func handleQueueDelivery(ctx context.Context, workerID int, service *MonitorServ
 	record := CheckRecordFromResult(result)
 	record.JobID = delivery.Job.JobID
 	if err := service.StoreCheckResult(ctx, record, result); err != nil {
-		if nackErr := delivery.Nack(ctx, true); nackErr != nil {
+		now := time.Now().UTC()
+		if delivery.Retryable {
+			if queueErr := service.MarkQueued(ctx, delivery.Job.MonitorID, delivery.Job.JobID, now); queueErr != nil {
+				logger.Warn("Failed to release processing lease before retry", "worker", workerID, "job_id", delivery.Job.JobID, "error", queueErr)
+			}
+		} else {
+			nextCheckAt := now.Add(time.Duration(monitor.IntervalSeconds) * time.Second)
+			if queueErr := service.FailProcessing(ctx, delivery.Job.MonitorID, delivery.Job.JobID, nextCheckAt); queueErr != nil {
+				logger.Warn("Failed to finalize exhausted job before dead-letter", "worker", workerID, "job_id", delivery.Job.JobID, "error", queueErr)
+			}
+		}
+		if nackErr := delivery.Nack(ctx, delivery.Retryable); nackErr != nil {
 			logger.Warn("Failed to nack job after result storage error", "worker", workerID, "job_id", delivery.Job.JobID, "error", nackErr)
 		}
 		return

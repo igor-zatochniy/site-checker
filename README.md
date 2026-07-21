@@ -219,11 +219,19 @@ Manifests live in:
 deploy/kubernetes/
 ```
 
-Apply:
+Create the local Secret file first:
 
 ```bash
-kubectl apply -k deploy/kubernetes/
+cp deploy/kubernetes/secret.example.yaml deploy/kubernetes/local/secret.yaml
 ```
+
+Then apply the local overlay:
+
+```bash
+kubectl apply -k deploy/kubernetes/local/
+```
+
+The local `deploy/kubernetes/local/secret.yaml` file is ignored by git and is included by the local Kustomize overlay. The checked-in base stays secret-free so CI can render immutable release manifests and production deployments can provide secrets through External Secrets, SOPS, Sealed Secrets, or a managed secret store.
 
 The checked-in Kustomize base uses a fixed version tag and never uses `latest`. A `v*` Git tag publishes both the release tag and an immutable `sha-<commit>` tag to GHCR. CI also captures the pushed image digest and uploads a rendered Kubernetes manifest artifact whose application containers use `image@sha256:...`. Use that artifact for production releases:
 
@@ -356,7 +364,7 @@ APP_ENV=demo go run .
 
 By default, Site Checker blocks private networks, loopback addresses, link-local ranges, metadata IPs such as `169.254.169.254`, unsupported schemes, userinfo in URLs, unexpected ports, unsafe redirects, and environment proxies. Enable overrides only for trusted internal deployments.
 
-`deploy/kubernetes/secret.example.yaml` is a template only. Keep a real `deploy/kubernetes/secret.yaml` untracked or use External Secrets Operator, SOPS, Sealed Secrets, or a managed secret store with rotation.
+`deploy/kubernetes/secret.example.yaml` is a template only. Copy it to an untracked `deploy/kubernetes/local/secret.yaml` and apply `deploy/kubernetes/local/` for local clusters. For production, use External Secrets Operator, SOPS, Sealed Secrets, or a managed secret store with rotation.
 
 ## License
 

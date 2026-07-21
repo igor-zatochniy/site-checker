@@ -78,6 +78,14 @@ func (s *MonitorService) MarkProcessing(ctx context.Context, id, jobID string, n
 	return s.repo.MarkProcessing(ctx, id, jobID, now, leaseTimeout)
 }
 
+func (s *MonitorService) MarkQueued(ctx context.Context, id, jobID string, now time.Time) error {
+	return s.repo.MarkQueued(ctx, id, jobID, now)
+}
+
+func (s *MonitorService) FailProcessing(ctx context.Context, id, jobID string, nextCheckAt time.Time) error {
+	return s.repo.FailProcessing(ctx, id, jobID, nextCheckAt)
+}
+
 func (s *MonitorService) CompleteWithoutRecord(ctx context.Context, id string) error {
 	return s.repo.CompleteWithoutRecord(ctx, id)
 }
@@ -93,6 +101,7 @@ func (s *MonitorService) RunManualCheck(ctx context.Context, id string) (CheckRe
 
 	result := s.checker.CheckMonitor(checkCtx, monitor)
 	record := CheckRecordFromResult(result)
+	record.JobID = newID("manual")
 	if err := s.StoreCheckResult(ctx, record, result); err != nil {
 		return CheckRecord{}, err
 	}

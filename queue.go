@@ -26,9 +26,10 @@ type CheckJobMessage struct {
 }
 
 type QueueDelivery struct {
-	Job  CheckJobMessage
-	Ack  func(ctx context.Context) error
-	Nack func(ctx context.Context, requeue bool) error
+	Job       CheckJobMessage
+	Retryable bool
+	Ack       func(ctx context.Context) error
+	Nack      func(ctx context.Context, requeue bool) error
 }
 
 type JobQueue interface {
@@ -107,7 +108,8 @@ func (q *InMemoryQueue) Consume(ctx context.Context) (<-chan QueueDelivery, <-ch
 					return
 				}
 				delivery := QueueDelivery{
-					Job: job,
+					Job:       job,
+					Retryable: job.Attempt < q.maxAttempts,
 				}
 				delivery.Ack = func(context.Context) error {
 					q.forget(job.JobID)
@@ -400,7 +402,10 @@ func (q *RabbitMQQueue) consumeSession(ctx context.Context, deliveries chan<- Qu
 				continue
 			}
 
-			queueDelivery := QueueDelivery{Job: job}
+			queueDelivery := QueueDelivery{
+				Job:       job,
+				Retryable: job.Attempt < q.maxAttempts,
+			}
 			queueDelivery.Ack = func(context.Context) error {
 				return msg.Ack(false)
 			}
