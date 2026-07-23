@@ -144,6 +144,107 @@ func TestMonitorStoreMovesJobBackToQueuedBeforeRetry(t *testing.T) {
 	}
 }
 
+func TestMonitorStoreManualCheckDoesNotClearScheduledLease(t *testing.T) {
+	cfg := testCheckerConfig(t)
+	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}
+	store := NewMonitorStore(NewNetworkPolicy(cfg))
+
+	monitor, err := store.Create(MonitorInput{
+		URL:             "https://example.com",
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	claimed := store.ClaimDueWithLease(10, now, time.Minute)
+	if len(claimed) != 1 || claimed[0].ID != monitor.ID {
+		t.Fatalf("claimed = %+v, want monitor %s", claimed, monitor.ID)
+	}
+	jobID := NewCheckJobID(monitor.ID, monitor.NextCheckAt)
+	if err := store.MarkProcessing(monitor.ID, jobID, now.Add(10*time.Second), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := store.AddManualCheck(CheckRecord{
+		ID:         newID("check"),
+		JobID:      newID("manual"),
+		MonitorID:  monitor.ID,
+		StatusCode: 200,
+		LatencyMS:  25,
+		Success:    true,
+		CheckedAt:  now.Add(20 * time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.NextCheckAt.Equal(monitor.NextCheckAt) {
+		t.Fatalf("manual check moved next_check_at to %s, want %s", updated.NextCheckAt, monitor.NextCheckAt)
+	}
+	if err := store.MarkProcessing(monitor.ID, jobID, now.Add(30*time.Second), time.Minute); !errors.Is(err, ErrJobAlreadyProcessing) {
+		t.Fatalf("manual check cleared scheduled lease, MarkProcessing error = %v", err)
+	}
+
+	_, err = store.AddCheck(CheckRecord{
+		ID:         newID("check"),
+		JobID:      jobID,
+		MonitorID:  monitor.ID,
+		StatusCode: 200,
+		LatencyMS:  30,
+		Success:    true,
+		CheckedAt:  now.Add(40 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("scheduled result after manual check error = %v", err)
+	}
+}
+
+func TestMonitorStoreFailProcessingUsesCurrentUpdatedAt(t *testing.T) {
+	cfg := testCheckerConfig(t)
+	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}
+	store := NewMonitorStore(NewNetworkPolicy(cfg))
+
+	monitor, err := store.Create(MonitorInput{
+		URL:             "https://example.com",
+		IntervalSeconds: 300,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claimedAt := time.Now().UTC()
+	claimed := store.ClaimDueWithLease(10, claimedAt, time.Minute)
+	if len(claimed) != 1 || claimed[0].ID != monitor.ID {
+		t.Fatalf("claimed = %+v, want monitor %s", claimed, monitor.ID)
+	}
+	jobID := NewCheckJobID(monitor.ID, monitor.NextCheckAt)
+	if err := store.MarkProcessing(monitor.ID, jobID, claimedAt.Add(10*time.Second), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	updatedAt := claimedAt.Add(20 * time.Second)
+	nextCheckAt := updatedAt.Add(5 * time.Minute)
+	if err := store.FailProcessing(monitor.ID, jobID, updatedAt, nextCheckAt); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.Get(monitor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("updated_at = %s, want %s", got.UpdatedAt, updatedAt)
+	}
+	if !got.NextCheckAt.Equal(nextCheckAt) {
+		t.Fatalf("next_check_at = %s, want %s", got.NextCheckAt, nextCheckAt)
+	}
+}
+
 func TestMonitorStoreBoundsProcessedJobIDs(t *testing.T) {
 	cfg := testCheckerConfig(t)
 	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}

@@ -82,8 +82,8 @@ func (s *MonitorService) MarkQueued(ctx context.Context, id, jobID string, now t
 	return s.repo.MarkQueued(ctx, id, jobID, now)
 }
 
-func (s *MonitorService) FailProcessing(ctx context.Context, id, jobID string, nextCheckAt time.Time) error {
-	return s.repo.FailProcessing(ctx, id, jobID, nextCheckAt)
+func (s *MonitorService) FailProcessing(ctx context.Context, id, jobID string, now, nextCheckAt time.Time) error {
+	return s.repo.FailProcessing(ctx, id, jobID, now, nextCheckAt)
 }
 
 func (s *MonitorService) CompleteWithoutRecord(ctx context.Context, id string) error {
@@ -102,7 +102,7 @@ func (s *MonitorService) RunManualCheck(ctx context.Context, id string) (CheckRe
 	result := s.checker.CheckMonitor(checkCtx, monitor)
 	record := CheckRecordFromResult(result)
 	record.JobID = newID("manual")
-	if err := s.StoreCheckResult(ctx, record, result); err != nil {
+	if err := s.StoreManualCheckResult(ctx, record, result); err != nil {
 		return CheckRecord{}, err
 	}
 	return record, nil
@@ -110,6 +110,18 @@ func (s *MonitorService) RunManualCheck(ctx context.Context, id string) (CheckRe
 
 func (s *MonitorService) StoreCheckResult(ctx context.Context, record CheckRecord, result CheckResult) error {
 	if _, err := s.repo.AddCheck(ctx, record, s.alertPolicy); err != nil {
+		if errors.Is(err, ErrDuplicateJob) {
+			return nil
+		}
+		return err
+	}
+
+	s.metrics.RecordResult(result)
+	return nil
+}
+
+func (s *MonitorService) StoreManualCheckResult(ctx context.Context, record CheckRecord, result CheckResult) error {
+	if _, err := s.repo.AddManualCheck(ctx, record, s.alertPolicy); err != nil {
 		if errors.Is(err, ErrDuplicateJob) {
 			return nil
 		}

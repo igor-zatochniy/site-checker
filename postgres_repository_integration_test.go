@@ -215,4 +215,117 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if total != 0 || len(incidents) != 0 {
 		t.Fatalf("open incidents total=%d len=%d, want 0 after recovery", total, len(incidents))
 	}
+
+	manualLeaseMonitor, err := repo.Create(ctx, MonitorInput{
+		URL:             "https://manual-check.example.com",
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manualNow := time.Now().UTC()
+	manualClaimed, err := repo.ClaimDue(ctx, 10, manualNow, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundManualLeaseMonitor := false
+	for _, claimed := range manualClaimed {
+		if claimed.ID == manualLeaseMonitor.ID {
+			foundManualLeaseMonitor = true
+			break
+		}
+	}
+	if !foundManualLeaseMonitor {
+		t.Fatalf("manual lease monitor was not claimed: %+v", manualClaimed)
+	}
+	manualScheduledJobID := NewCheckJobID(manualLeaseMonitor.ID, manualLeaseMonitor.NextCheckAt)
+	if err := repo.MarkProcessing(ctx, manualLeaseMonitor.ID, manualScheduledJobID, manualNow.Add(10*time.Second), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	manualUpdated, err := repo.AddManualCheck(ctx, CheckRecord{
+		ID:         newID("chk"),
+		JobID:      newID("manual"),
+		MonitorID:  manualLeaseMonitor.ID,
+		StatusCode: 200,
+		LatencyMS:  20,
+		Success:    true,
+		CheckedAt:  manualNow.Add(20 * time.Second),
+	}, AlertPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !manualUpdated.NextCheckAt.Equal(manualLeaseMonitor.NextCheckAt) {
+		t.Fatalf("manual check moved next_check_at to %s, want %s", manualUpdated.NextCheckAt, manualLeaseMonitor.NextCheckAt)
+	}
+	if err := repo.MarkProcessing(ctx, manualLeaseMonitor.ID, manualScheduledJobID, manualNow.Add(30*time.Second), time.Minute); !errors.Is(err, ErrJobAlreadyProcessing) {
+		t.Fatalf("manual check cleared scheduled lease, MarkProcessing error = %v", err)
+	}
+
+	_, err = repo.AddCheck(ctx, CheckRecord{
+		ID:         newID("chk"),
+		JobID:      manualScheduledJobID,
+		MonitorID:  manualLeaseMonitor.ID,
+		StatusCode: 200,
+		LatencyMS:  25,
+		Success:    true,
+		CheckedAt:  manualNow.Add(40 * time.Second),
+	}, AlertPolicy{})
+	if err != nil {
+		t.Fatalf("scheduled result after manual check error = %v", err)
+	}
+	manualChecks, manualTotal, err := repo.ListChecks(ctx, manualLeaseMonitor.ID, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manualTotal != 2 || len(manualChecks) != 2 {
+		t.Fatalf("manual monitor checks total=%d len=%d, want 2", manualTotal, len(manualChecks))
+	}
+
+	failProcessingMonitor, err := repo.Create(ctx, MonitorInput{
+		URL:             "https://fail-processing.example.com",
+		IntervalSeconds: 300,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failNow := time.Now().UTC()
+	failClaimed, err := repo.ClaimDue(ctx, 10, failNow, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundFailProcessingMonitor := false
+	for _, claimed := range failClaimed {
+		if claimed.ID == failProcessingMonitor.ID {
+			foundFailProcessingMonitor = true
+			break
+		}
+	}
+	if !foundFailProcessingMonitor {
+		t.Fatalf("fail-processing monitor was not claimed: %+v", failClaimed)
+	}
+	failJobID := NewCheckJobID(failProcessingMonitor.ID, failProcessingMonitor.NextCheckAt)
+	if err := repo.MarkProcessing(ctx, failProcessingMonitor.ID, failJobID, failNow.Add(10*time.Second), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	updatedAt := failNow.Add(20 * time.Second)
+	nextCheckAt := updatedAt.Add(5 * time.Minute)
+	if err := repo.FailProcessing(ctx, failProcessingMonitor.ID, failJobID, updatedAt, nextCheckAt); err != nil {
+		t.Fatal(err)
+	}
+	afterFailProcessing, err := repo.Get(ctx, failProcessingMonitor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !afterFailProcessing.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("updated_at = %s, want %s", afterFailProcessing.UpdatedAt, updatedAt)
+	}
+	if !afterFailProcessing.NextCheckAt.Equal(nextCheckAt) {
+		t.Fatalf("next_check_at = %s, want %s", afterFailProcessing.NextCheckAt, nextCheckAt)
+	}
 }

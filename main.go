@@ -115,8 +115,14 @@ func main() {
 		defer queue.Close()
 	}
 
+	var wg sync.WaitGroup
 	if cfg.HealthAddr != "" {
-		RunHTTPServer(ctx, cfg, metrics, api, roleEnabled(cfg.AppRole, "api"), BuildReadinessDependencies(cfg, repo, queue), logger, cancel)
+		_, httpDone := RunHTTPServer(ctx, cfg, metrics, api, roleEnabled(cfg.AppRole, "api"), BuildReadinessDependencies(cfg, repo, queue), logger, cancel)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-httpDone
+		}()
 	}
 
 	logger.Info("Site Checker started",
@@ -135,7 +141,6 @@ func main() {
 		"alerts_enabled", alertPolicy.Enabled,
 	)
 
-	var wg sync.WaitGroup
 	if queue != nil && roleEnabled(cfg.AppRole, "scheduler") {
 		wg.Add(1)
 		go func() {

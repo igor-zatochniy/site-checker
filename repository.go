@@ -17,8 +17,9 @@ type MonitorRepository interface {
 	ClaimDue(ctx context.Context, limit int, now time.Time, leaseTimeout time.Duration) ([]Monitor, error)
 	MarkProcessing(ctx context.Context, id, jobID string, now time.Time, leaseTimeout time.Duration) error
 	MarkQueued(ctx context.Context, id, jobID string, now time.Time) error
-	FailProcessing(ctx context.Context, id, jobID string, nextCheckAt time.Time) error
+	FailProcessing(ctx context.Context, id, jobID string, now, nextCheckAt time.Time) error
 	AddCheck(ctx context.Context, record CheckRecord, alertPolicy AlertPolicy) (Monitor, error)
+	AddManualCheck(ctx context.Context, record CheckRecord, alertPolicy AlertPolicy) (Monitor, error)
 	CompleteWithoutRecord(ctx context.Context, id string) error
 	ListChecks(ctx context.Context, id string, offset, limit int) ([]CheckRecord, int, error)
 	Stats(ctx context.Context, id string) (MonitorStats, error)
@@ -78,12 +79,16 @@ func (r *InMemoryMonitorRepository) MarkQueued(_ context.Context, id, jobID stri
 	return r.store.MarkQueued(id, jobID, now)
 }
 
-func (r *InMemoryMonitorRepository) FailProcessing(_ context.Context, id, jobID string, nextCheckAt time.Time) error {
-	return r.store.FailProcessing(id, jobID, nextCheckAt)
+func (r *InMemoryMonitorRepository) FailProcessing(_ context.Context, id, jobID string, now, nextCheckAt time.Time) error {
+	return r.store.FailProcessing(id, jobID, now, nextCheckAt)
 }
 
 func (r *InMemoryMonitorRepository) AddCheck(_ context.Context, record CheckRecord, _ AlertPolicy) (Monitor, error) {
 	return r.store.AddCheck(record)
+}
+
+func (r *InMemoryMonitorRepository) AddManualCheck(_ context.Context, record CheckRecord, _ AlertPolicy) (Monitor, error) {
+	return r.store.AddManualCheck(record)
 }
 
 func (r *InMemoryMonitorRepository) CompleteWithoutRecord(_ context.Context, id string) error {

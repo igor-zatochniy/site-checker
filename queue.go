@@ -16,6 +16,8 @@ import (
 var (
 	ErrQueueFull           = errors.New("job queue is full")
 	ErrQueueConsumerClosed = errors.New("queue consumer closed unexpectedly")
+	ErrRabbitMQReturned    = errors.New("rabbitmq returned unroutable message")
+	ErrRabbitMQNack        = errors.New("rabbitmq publish was negatively acknowledged")
 )
 
 type CheckJobMessage struct {
@@ -186,11 +188,21 @@ type RabbitMQQueue struct {
 	reconnectGate chan struct{}
 	conn          *amqp.Connection
 	channel       *amqp.Channel
+	confirms      <-chan amqp.Confirmation
+	returns       <-chan amqp.Return
+	publishClosed <-chan *amqp.Error
 	closed        bool
 	done          chan struct{}
 }
 
 type rabbitMQDialFunc func(ctx context.Context, rawURL string, timeout time.Duration) (*amqp.Connection, error)
+
+type rabbitMQPublishSession struct {
+	channel  *amqp.Channel
+	confirms <-chan amqp.Confirmation
+	returns  <-chan amqp.Return
+	closed   <-chan *amqp.Error
+}
 
 func NewRabbitMQQueue(cfg Config) (*RabbitMQQueue, error) {
 	queue := &RabbitMQQueue{
@@ -301,30 +313,82 @@ func (q *RabbitMQQueue) Publish(ctx context.Context, job CheckJobMessage) error 
 			return err
 		}
 		q.publishMu.Lock()
-		channel := q.publishChannel()
-		if channel == nil {
+		session := q.publishSession()
+		if session.channel == nil {
 			q.publishMu.Unlock()
 			continue
 		}
-		err := channel.PublishWithContext(ctx, "", q.queueName, false, false, amqp.Publishing{
+		err := session.channel.PublishWithContext(ctx, "", q.queueName, true, false, amqp.Publishing{
 			ContentType:  "application/json",
 			DeliveryMode: amqp.Persistent,
 			MessageId:    job.JobID,
 			Timestamp:    job.EnqueuedAt,
 			Body:         body,
 		})
+		if err == nil {
+			err = q.waitForPublishConfirmation(ctx, session, job.JobID)
+		}
 		q.publishMu.Unlock()
 		if err == nil {
 			return nil
 		}
+		if errors.Is(err, ErrRabbitMQReturned) {
+			return err
+		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		q.invalidatePublishChannel(channel)
+		q.invalidatePublishChannel(session.channel)
 		delay := rabbitMQReconnectDelay(attempt, q.reconnectInitial, q.reconnectMax)
 		slog.Warn("RabbitMQ publish failed; reconnecting", "attempt", attempt, "retry_in", delay, "error", err)
 		if err := q.waitForReconnect(ctx, delay); err != nil {
 			return err
+		}
+	}
+}
+
+func (q *RabbitMQQueue) waitForPublishConfirmation(ctx context.Context, session rabbitMQPublishSession, jobID string) error {
+	confirms := session.confirms
+	returns := session.returns
+	closed := session.closed
+	if session.channel == nil || confirms == nil || closed == nil {
+		return ErrQueueConsumerClosed
+	}
+	var returned *amqp.Return
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-q.done:
+			return context.Canceled
+		case ret, ok := <-returns:
+			if !ok {
+				returns = nil
+				continue
+			}
+			returned = &ret
+		case closeErr, ok := <-closed:
+			if ok && closeErr != nil {
+				return fmt.Errorf("rabbitmq publish channel closed before confirmation: %w", closeErr)
+			}
+			return ErrQueueConsumerClosed
+		case confirm, ok := <-confirms:
+			if !ok {
+				return ErrQueueConsumerClosed
+			}
+			if !confirm.Ack {
+				if returned != nil {
+					return fmt.Errorf("%w: job_id=%s routing_key=%s reply_code=%d reply_text=%s: %w",
+						ErrRabbitMQReturned, jobID, returned.RoutingKey, returned.ReplyCode, returned.ReplyText, ErrRabbitMQNack)
+				}
+				return fmt.Errorf("%w: job_id=%s delivery_tag=%d", ErrRabbitMQNack, jobID, confirm.DeliveryTag)
+			}
+			if returned != nil {
+				return fmt.Errorf("%w: job_id=%s routing_key=%s reply_code=%d reply_text=%s",
+					ErrRabbitMQReturned, jobID, returned.RoutingKey, returned.ReplyCode, returned.ReplyText)
+			}
+			return nil
 		}
 	}
 }
@@ -490,6 +554,14 @@ func (q *RabbitMQQueue) connectOnce(ctx context.Context) error {
 		_ = conn.Close()
 		return err
 	}
+	confirms := channel.NotifyPublish(make(chan amqp.Confirmation, 1))
+	returns := channel.NotifyReturn(make(chan amqp.Return, 1))
+	publishClosed := channel.NotifyClose(make(chan *amqp.Error, 1))
+	if err := channel.Confirm(false); err != nil {
+		_ = channel.Close()
+		_ = conn.Close()
+		return err
+	}
 
 	q.mu.Lock()
 	if q.closed {
@@ -501,6 +573,9 @@ func (q *RabbitMQQueue) connectOnce(ctx context.Context) error {
 	oldConn := q.conn
 	q.conn = conn
 	q.channel = channel
+	q.confirms = confirms
+	q.returns = returns
+	q.publishClosed = publishClosed
 	q.mu.Unlock()
 	if oldConn != nil && oldConn != conn {
 		_ = oldConn.Close()
@@ -560,6 +635,17 @@ func (q *RabbitMQQueue) publishChannel() *amqp.Channel {
 	return q.channel
 }
 
+func (q *RabbitMQQueue) publishSession() rabbitMQPublishSession {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return rabbitMQPublishSession{
+		channel:  q.channel,
+		confirms: q.confirms,
+		returns:  q.returns,
+		closed:   q.publishClosed,
+	}
+}
+
 func (q *RabbitMQQueue) invalidatePublishChannel(channel *amqp.Channel) {
 	q.mu.Lock()
 	if q.channel != channel {
@@ -569,6 +655,9 @@ func (q *RabbitMQQueue) invalidatePublishChannel(channel *amqp.Channel) {
 	conn := q.conn
 	q.conn = nil
 	q.channel = nil
+	q.confirms = nil
+	q.returns = nil
+	q.publishClosed = nil
 	q.mu.Unlock()
 	if conn != nil {
 		_ = conn.Close()
@@ -583,6 +672,9 @@ func (q *RabbitMQQueue) invalidateConnection(conn *amqp.Connection) {
 	}
 	q.conn = nil
 	q.channel = nil
+	q.confirms = nil
+	q.returns = nil
+	q.publishClosed = nil
 	q.mu.Unlock()
 	_ = conn.Close()
 }
@@ -598,6 +690,9 @@ func (q *RabbitMQQueue) Close() error {
 	conn := q.conn
 	q.conn = nil
 	q.channel = nil
+	q.confirms = nil
+	q.returns = nil
+	q.publishClosed = nil
 	q.mu.Unlock()
 	if conn == nil || conn.IsClosed() {
 		return nil

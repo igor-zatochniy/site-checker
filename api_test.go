@@ -300,11 +300,15 @@ func (r failingMonitorRepository) MarkQueued(context.Context, string, string, ti
 	return r.err
 }
 
-func (r failingMonitorRepository) FailProcessing(context.Context, string, string, time.Time) error {
+func (r failingMonitorRepository) FailProcessing(context.Context, string, string, time.Time, time.Time) error {
 	return r.err
 }
 
 func (r failingMonitorRepository) AddCheck(context.Context, CheckRecord, AlertPolicy) (Monitor, error) {
+	return Monitor{}, r.err
+}
+
+func (r failingMonitorRepository) AddManualCheck(context.Context, CheckRecord, AlertPolicy) (Monitor, error) {
 	return Monitor{}, r.err
 }
 

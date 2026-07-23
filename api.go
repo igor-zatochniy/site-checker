@@ -219,6 +219,10 @@ func mapAPIError(err error) (int, string, string) {
 		return http.StatusConflict, "monitor_exists", "monitor already exists"
 	case errors.Is(err, ErrInvalidMonitor):
 		return http.StatusBadRequest, "invalid_monitor", "monitor request is invalid"
+	case errors.Is(err, ErrStaleJob):
+		return http.StatusConflict, "stale_check_job", "check job is no longer active"
+	case errors.Is(err, ErrJobAlreadyProcessing):
+		return http.StatusConflict, "check_job_processing", "check job is already processing"
 	case errors.Is(err, ErrQueueFull), errors.Is(err, ErrQueueConsumerClosed):
 		return http.StatusServiceUnavailable, "queue_unavailable", "check queue is unavailable"
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):

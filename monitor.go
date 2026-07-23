@@ -392,7 +392,7 @@ func (s *MonitorStore) MarkQueued(id, jobID string, now time.Time) error {
 	return nil
 }
 
-func (s *MonitorStore) FailProcessing(id, jobID string, nextCheckAt time.Time) error {
+func (s *MonitorStore) FailProcessing(id, jobID string, now, nextCheckAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -408,7 +408,7 @@ func (s *MonitorStore) FailProcessing(id, jobID string, nextCheckAt time.Time) e
 	delete(s.pending, id)
 
 	monitor.NextCheckAt = nextCheckAt.UTC()
-	monitor.UpdatedAt = nextCheckAt.UTC()
+	monitor.UpdatedAt = now.UTC()
 	s.byID[id] = monitor
 	return nil
 }
@@ -436,6 +436,38 @@ func (s *MonitorStore) AddCheck(record CheckRecord) (Monitor, error) {
 	monitor.LastCheckedAt = record.CheckedAt
 	monitor.LastError = record.Error
 	monitor.NextCheckAt = now.Add(time.Duration(monitor.IntervalSeconds) * time.Second)
+	monitor.UpdatedAt = now
+	s.byID[record.MonitorID] = monitor
+
+	records := append(s.checks[record.MonitorID], record)
+	if len(records) > maxChecksPerMonitor {
+		records = records[len(records)-maxChecksPerMonitor:]
+	}
+	s.checks[record.MonitorID] = records
+	s.updateIncident(record, now)
+	return monitor, nil
+}
+
+func (s *MonitorStore) AddManualCheck(record CheckRecord) (Monitor, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	monitor, exists := s.byID[record.MonitorID]
+	if !exists {
+		return Monitor{}, ErrMonitorNotFound
+	}
+	if record.JobID != "" {
+		if _, exists := s.processedJobs[record.JobID]; exists {
+			return monitor, ErrDuplicateJob
+		}
+		s.rememberProcessedJobLocked(record.JobID)
+	}
+
+	now := time.Now().UTC()
+	monitor.LastStatusCode = record.StatusCode
+	monitor.LastLatencyMS = record.LatencyMS
+	monitor.LastCheckedAt = record.CheckedAt
+	monitor.LastError = record.Error
 	monitor.UpdatedAt = now
 	s.byID[record.MonitorID] = monitor
 

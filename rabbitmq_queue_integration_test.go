@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -119,6 +120,59 @@ func TestRabbitMQQueueRetriesAndDeadLetters(t *testing.T) {
 	}
 	if err := queue.Ping(reconnectCtx); err != nil {
 		t.Fatalf("ping after reconnect: %v", err)
+	}
+}
+
+func TestRabbitMQQueueReturnsUnroutablePublish(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	rabbit, err := testcontainers.Run(ctx,
+		"rabbitmq:4-management-alpine",
+		testcontainers.WithEnv(map[string]string{
+			"RABBITMQ_DEFAULT_USER": "site_checker",
+			"RABBITMQ_DEFAULT_PASS": "site_checker",
+		}),
+		testcontainers.WithExposedPorts("5672/tcp"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("Server startup complete").WithStartupTimeout(2*time.Minute),
+			wait.ForListeningPort("5672/tcp"),
+		),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := testcontainers.TerminateContainer(rabbit); err != nil {
+			t.Logf("failed to terminate rabbitmq container: %v", err)
+		}
+	}()
+
+	endpoint, err := rabbit.PortEndpoint(ctx, "5672/tcp", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue, err := NewRabbitMQQueue(Config{
+		RabbitMQURL:         fmt.Sprintf("amqp://site_checker:site_checker@%s/", endpoint),
+		QueueName:           "site_checker.integration.unroutable.checks",
+		DeadLetterQueueName: "site_checker.integration.unroutable.checks.dead",
+		QueuePrefetch:       1,
+		MaxJobAttempts:      2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer queue.Close()
+
+	queue.queueName = "site_checker.integration.unroutable.missing"
+	err = queue.Publish(ctx, CheckJobMessage{
+		JobID:      "job_integration_unroutable",
+		MonitorID:  "mon_integration",
+		Attempt:    1,
+		EnqueuedAt: time.Now().UTC(),
+	})
+	if !errors.Is(err, ErrRabbitMQReturned) {
+		t.Fatalf("publish error = %v, want ErrRabbitMQReturned", err)
 	}
 }
 

@@ -345,7 +345,7 @@ func (r *PostgresMonitorRepository) MarkQueued(ctx context.Context, id, jobID st
 	return ErrStaleJob
 }
 
-func (r *PostgresMonitorRepository) FailProcessing(ctx context.Context, id, jobID string, nextCheckAt time.Time) error {
+func (r *PostgresMonitorRepository) FailProcessing(ctx context.Context, id, jobID string, now, nextCheckAt time.Time) error {
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE monitors
 		SET pending = false,
@@ -356,7 +356,7 @@ func (r *PostgresMonitorRepository) FailProcessing(ctx context.Context, id, jobI
 		WHERE id = $1
 			AND pending = true
 			AND pending_job_id = $2
-	`, id, jobID, nextCheckAt.UTC(), nextCheckAt.UTC())
+	`, id, jobID, nextCheckAt.UTC(), now.UTC())
 	if err != nil {
 		return err
 	}
@@ -425,6 +425,56 @@ func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRe
 			return Monitor{}, ErrMonitorNotFound
 		}
 		return Monitor{}, ErrStaleJob
+	}
+	if err != nil {
+		return Monitor{}, err
+	}
+
+	if err := upsertIncidentAndAlert(ctx, tx, record, monitor, alertPolicy); err != nil {
+		return Monitor{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Monitor{}, err
+	}
+	return monitor, nil
+}
+
+func (r *PostgresMonitorRepository) AddManualCheck(ctx context.Context, record CheckRecord, alertPolicy AlertPolicy) (Monitor, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return Monitor{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO check_results (
+			id, job_id, monitor_id, status_code, latency_ms, error, success, checked_at
+		)
+		VALUES ($1, NULLIF($2, ''), $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (job_id) DO NOTHING
+	`, record.ID, record.JobID, record.MonitorID, record.StatusCode, record.LatencyMS,
+		record.Error, record.Success, record.CheckedAt.UTC())
+	if err != nil {
+		return Monitor{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		return Monitor{}, ErrDuplicateJob
+	}
+
+	monitor, err := scanMonitor(tx.QueryRow(ctx, `
+		UPDATE monitors
+		SET last_status_code = $2,
+			last_latency_ms = $3,
+			last_checked_at = $4::timestamptz,
+			last_error = $5,
+			updated_at = $6::timestamptz
+		WHERE id = $1
+		RETURNING id, url, interval_seconds, timeout_seconds, expected_status,
+			status, enabled, next_check_at, created_at, updated_at,
+			last_status_code, last_latency_ms, last_checked_at, last_error
+	`, record.MonitorID, record.StatusCode, record.LatencyMS, record.CheckedAt.UTC(), record.Error, time.Now().UTC()))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Monitor{}, ErrMonitorNotFound
 	}
 	if err != nil {
 		return Monitor{}, err
