@@ -7,7 +7,7 @@ Site Checker is a backend monitoring platform written in Go. It manages website 
 ## Technology
 
 - Go 1.26, `net/http`, `log/slog`, goroutines, channels, and `context.Context`.
-- PostgreSQL with `pgxpool`, embedded SQL migrations, monitor history, incidents, and a transactional alert outbox.
+- PostgreSQL with `pgxpool`, embedded SQL migrations, persisted check jobs, monitor history, incidents, and a transactional alert outbox.
 - REST API with repository/service/handler separation and API key authentication.
 - OpenAPI contract in [`api/openapi.yaml`](api/openapi.yaml).
 - JobQueue abstraction with in-memory and RabbitMQ implementations.
@@ -54,6 +54,15 @@ flowchart LR
   Scheduler --> Metrics
   Worker --> Metrics
 ```
+
+## Source layout
+
+- `main.go` is the thin binary entrypoint and build metadata target.
+- `internal/sitechecker/` contains the application runtime, domain model, storage, queue, HTTP API, observability, and tests.
+- `api/openapi.yaml` is the public API contract; the runtime embeds a synchronized copy under `internal/sitechecker/api/`.
+- `migrations/` is the public SQL migration directory; the runtime embeds a synchronized copy under `internal/sitechecker/migrations/`.
+
+This keeps the executable boundary separate from application code while avoiding a risky package split that would move multiple production concerns at once.
 
 ## REST API
 
@@ -273,17 +282,20 @@ Expected demonstration:
 ## Engineering trade-offs
 
 - The service keeps one binary and selects behavior through `APP_ROLE`. This keeps deployment artifacts simple while still allowing API, Scheduler, Worker, and Alert Dispatcher roles to scale independently.
+- `package main` is intentionally thin. Application code lives in `internal/sitechecker`, which gives the binary a clear boundary while keeping related internals close enough to refactor safely.
 - The repository and queue interfaces support both local in-memory mode and production PostgreSQL/RabbitMQ mode. In-memory mode is fast for development, but PostgreSQL and RabbitMQ are the durable path for multi-replica deployments.
-- Scheduler and worker coordination uses explicit job IDs, monitor pending state, stale lease recovery, and RabbitMQ ack/nack semantics. This avoids duplicate persisted results and prevents stale queued jobs from creating repeated external HTTP checks.
+- PostgreSQL `check_jobs` is the authoritative job lifecycle: `scheduled → queued → processing → completed`, with explicit `failed` retry and terminal `dead` states. RabbitMQ transports job IDs, while database leases, attempts, retry availability, and terminal outcomes remain recoverable across process or broker restarts.
 - SSRF protection is implemented in application code and reinforced by Kubernetes NetworkPolicy. Application-level checks give portable behavior; network policy adds defense in depth in clusters.
 - A check result, incident transition, cooldown decision, and alert outbox insert share one PostgreSQL transaction. Webhook delivery is intentionally at-least-once; a stable `Idempotency-Key` lets receivers deduplicate the rare retry after an ambiguous network outcome.
 - Built-in demo URLs are opt-in. Normal deployments start with an empty monitor set to avoid sending unintended traffic to third-party websites.
-- RabbitMQ publication and consumption recover from runtime connection loss with bounded exponential backoff. Delivery remains at-least-once because a connection can fail after the broker accepted a publish or acknowledgement; persisted job IDs and processing leases make those retry windows safe.
+- RabbitMQ publication and consumption recover from runtime connection loss with bounded exponential backoff. Delivery remains at-least-once because a connection can fail after the broker accepted a publish or acknowledgement; persisted job states, monotonic attempts, unique result job IDs, and processing leases make those retry windows safe.
 - Kubernetes source manifests use a fixed readable tag for local rendering, while release CI produces a digest-pinned deployment bundle so production rollouts reference immutable image content.
 
 ## Known limitations
 
 - The in-memory repository and queue are intended for local development and tests, not durable production use.
+- External HTTP checks are at-least-once: if a worker exits after the request completes but before the result transaction commits, the persisted lease recovery can repeat that request.
+- PostgreSQL retention and partitioning for historical `check_jobs`, `check_results`, incidents, and delivered alert outbox rows are deployment-specific and are not automated by the service.
 - Webhook receivers should honor `Idempotency-Key` because no distributed system can guarantee exactly-once delivery across a database commit and an external HTTP endpoint.
 - PostgreSQL and RabbitMQ Kubernetes manifests are suitable for local or demonstration clusters. Production deployments should use managed services or hardened StatefulSets with backups, persistence, TLS, monitoring, and secret rotation.
 - KEDA queue-based scaling requires the KEDA operator to be installed separately.
@@ -311,7 +323,7 @@ Expected demonstration:
 | `MAX_JOB_ATTEMPTS` | `3` | Retry attempts before dead-lettering infrastructure failures. |
 | `WORKER_COUNT` | `10` | Number of worker goroutines in each worker process. |
 | `SCHEDULER_BATCH_SIZE` | `100` | Number of due monitors claimed per scheduler tick. |
-| `CHECK_LEASE_TIMEOUT` | `2m` | Reclaims stale queued jobs or processing jobs. The processing lease starts when a worker begins handling the job. |
+| `CHECK_LEASE_TIMEOUT` | `2m` | Bounds publication, queued-delivery, and processing recovery leases. It must exceed `HTTP_TIMEOUT`; expired jobs move through persisted retry state before republishing. |
 | `CHECK_INTERVAL` | `5m` | Default interval for seeded monitors. |
 | `HTTP_TIMEOUT` | `5s` | Default timeout for outbound checks. |
 | `HEALTH_ADDR` | `:8080` | Address for REST, health, and metrics endpoints. |

@@ -12,9 +12,8 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY *.go ./
-COPY api/openapi.yaml ./api/openapi.yaml
-COPY migrations/*.sql ./migrations/
+COPY main.go ./
+COPY internal ./internal
 
 ARG VERSION=dev
 ARG COMMIT=none
