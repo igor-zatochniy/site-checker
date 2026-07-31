@@ -7,10 +7,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -100,36 +98,14 @@ func TestAPIReturnsValidationError(t *testing.T) {
 	}
 }
 
-func TestAPIRunManualCheckReturnsOK(t *testing.T) {
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	}))
-	defer target.Close()
-
-	targetURL, err := http.NewRequest(http.MethodGet, target.URL, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	host, port, err := net.SplitHostPort(targetURL.URL.Host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = host
-	portNum, err := strconv.Atoi(port)
-	if err != nil {
-		t.Fatal(err)
-	}
-
+func TestAPIRunManualCheckReturnsAcceptedPersistedJob(t *testing.T) {
 	cfg := testCheckerConfig(t)
-	cfg.AllowPrivateNetworks = true
-	cfg.AllowedPorts = map[int]struct{}{portNum: {}}
+	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}
 	policy := NewNetworkPolicy(cfg)
 	store := NewMonitorStore(policy)
 	metrics := NewMetrics("test", "commit", "date", 0)
-	checker := NewChecker(target.Client(), cfg, metrics)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	service := NewMonitorService(NewInMemoryMonitorRepositoryFromStore(store), checker, metrics, AlertPolicy{}, logger)
+	service := NewMonitorService(NewInMemoryMonitorRepositoryFromStore(store), nil, metrics, AlertPolicy{}, logger)
 	handler := NewAPIHandler(service, "", logger)
 
 	mux := http.NewServeMux()
@@ -137,7 +113,7 @@ func TestAPIRunManualCheckReturnsOK(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	createBody := `{"url":"` + target.URL + `","interval_seconds":60,"timeout_seconds":5,"expected_status":200}`
+	createBody := `{"url":"https://example.com","interval_seconds":60,"timeout_seconds":5,"expected_status":200}`
 	resp := apiRequest(t, server.URL+"/api/v1/monitors", http.MethodPost, createBody)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create status = %d, want 201", resp.StatusCode)
@@ -146,30 +122,27 @@ func TestAPIRunManualCheckReturnsOK(t *testing.T) {
 	decodeResponse(t, resp, &created)
 	resp.Body.Close()
 
-	now := time.Now().UTC()
-	claimed := store.ClaimDueJobs(1, now, 2*time.Minute)
-	if len(claimed) != 1 {
-		t.Fatalf("claimed due jobs = %d, want 1", len(claimed))
-	}
-	scheduledJobID := claimed[0].ID
-
 	resp = apiRequest(t, server.URL+"/api/v1/monitors/"+created.ID+"/check", http.MethodPost, "")
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("manual check status = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("manual check status = %d, want 202", resp.StatusCode)
 	}
-	var record CheckRecord
-	decodeResponse(t, resp, &record)
-	if !record.Success {
-		t.Fatalf("manual check success = false, record = %+v", record)
+	var receipt ManualCheckJobReceipt
+	decodeResponse(t, resp, &receipt)
+	if receipt.JobID == "" || receipt.MonitorID != created.ID {
+		t.Fatalf("manual job receipt = %+v", receipt)
 	}
-	if record.JobID == "" {
-		t.Fatal("manual check job_id is empty")
+	if receipt.Kind != checkJobKindManual || receipt.Status != checkJobStatusScheduled || receipt.Deduplicated {
+		t.Fatalf("manual job receipt = %+v, want new scheduled manual job", receipt)
 	}
-	if err := store.MarkJobPublished(created.ID, scheduledJobID, now.Add(time.Second)); err != nil {
-		t.Fatalf("scheduled job was cleared by manual check: %v", err)
+	job, err := store.CheckJob(receipt.JobID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := store.MarkJobProcessing(created.ID, scheduledJobID, 1, now.Add(2*time.Second), 2*time.Minute); err != nil {
-		t.Fatalf("scheduled lease was cleared by manual check: %v", err)
+	if job.Kind != checkJobKindManual || job.Status != checkJobStatusScheduled {
+		t.Fatalf("persisted manual job = %+v", job)
+	}
+	if _, total, err := store.ListChecks(created.ID, 0, 10); err != nil || total != 0 {
+		t.Fatalf("checks before worker processing: total=%d err=%v", total, err)
 	}
 }
 
@@ -291,6 +264,10 @@ func (r failingMonitorRepository) Update(context.Context, string, MonitorPatch) 
 
 func (r failingMonitorRepository) Delete(context.Context, string) error { return r.err }
 
+func (r failingMonitorRepository) CreateManualJob(context.Context, string, time.Time) (CheckJobRecord, bool, error) {
+	return CheckJobRecord{}, false, r.err
+}
+
 func (r failingMonitorRepository) ClaimDueJobs(context.Context, int, time.Time, time.Duration) ([]CheckJobRecord, error) {
 	return nil, r.err
 }
@@ -303,23 +280,19 @@ func (r failingMonitorRepository) ReleaseJobPublish(context.Context, string, str
 	return r.err
 }
 
-func (r failingMonitorRepository) MarkJobProcessing(context.Context, string, string, int, time.Time, time.Duration) error {
+func (r failingMonitorRepository) MarkJobProcessing(context.Context, string, string, int, time.Time, time.Duration) (ProcessingLease, error) {
+	return ProcessingLease{}, r.err
+}
+
+func (r failingMonitorRepository) MarkJobFailed(context.Context, ProcessingLease, string, time.Time, time.Time) error {
 	return r.err
 }
 
-func (r failingMonitorRepository) MarkJobFailed(context.Context, string, string, string, time.Time, time.Time) error {
+func (r failingMonitorRepository) MarkJobDead(context.Context, ProcessingLease, string, time.Time, time.Time) error {
 	return r.err
 }
 
-func (r failingMonitorRepository) MarkJobDead(context.Context, string, string, string, time.Time, time.Time) error {
-	return r.err
-}
-
-func (r failingMonitorRepository) AddCheck(context.Context, CheckRecord, AlertPolicy) (Monitor, error) {
-	return Monitor{}, r.err
-}
-
-func (r failingMonitorRepository) AddManualCheck(context.Context, CheckRecord, AlertPolicy) (Monitor, error) {
+func (r failingMonitorRepository) AddCheck(context.Context, CheckRecord, ProcessingLease, AlertPolicy) (Monitor, error) {
 	return Monitor{}, r.err
 }
 

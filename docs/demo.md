@@ -79,7 +79,7 @@ Example response:
 }
 ```
 
-## Run a manual check
+## Queue a manual check
 
 ```bash
 curl -sS -X POST "$BASE_URL/api/v1/monitors/$MONITOR_ID/check" \
@@ -90,14 +90,22 @@ Example response:
 
 ```json
 {
-  "id": "chk_7b9d91e5e1a94d4e8d6c0a0b1c2d3e4f",
-  "job_id": "manual_9dd15e2e4e264c6e9a81c0ad9f117f53",
+  "job_id": "job_9dd15e2e4e264c6e9a81c0ad9f117f53",
   "monitor_id": "mon_8f5d9e0fd6f04d9e9f0d8f1a2b3c4d5e",
-  "status_code": 200,
-  "latency_ms": 123,
-  "success": true,
-  "checked_at": "2026-07-12T18:00:05Z"
+  "kind": "manual",
+  "status": "scheduled",
+  "created_at": "2026-07-12T18:00:05Z",
+  "deduplicated": false
 }
+```
+
+The endpoint returns `202 Accepted`. The scheduler publishes the persisted job to RabbitMQ and a worker performs the HTTP request. If the monitor already has an active job, the response returns that job with `"deduplicated": true`.
+
+Read the completed result from the check history:
+
+```bash
+curl -sS "$BASE_URL/api/v1/monitors/$MONITOR_ID/checks?limit=10" \\
+  -H "X-API-Key: $API_KEY"
 ```
 
 ## Health, readiness, and metrics

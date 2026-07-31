@@ -127,15 +127,15 @@ paths:
       - $ref: "#/components/parameters/MonitorID"
     post:
       tags: [Monitors]
-      summary: Run manual check
+      summary: Queue manual check
       operationId: runManualCheck
       responses:
-        "200":
-          description: Synchronous check completed and stored
+        "202":
+          description: Check job persisted for scheduler and worker processing
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CheckRecord"
+                $ref: "#/components/schemas/ManualCheckJobReceipt"
         "404":
           $ref: "#/components/responses/NotFound"
   /api/v1/monitors/{id}/stats:
@@ -327,6 +327,27 @@ components:
         checked_at:
           type: string
           format: date-time
+    ManualCheckJobReceipt:
+      type: object
+      required: [job_id, monitor_id, kind, status, created_at, deduplicated]
+      properties:
+        job_id:
+          type: string
+        monitor_id:
+          type: string
+        kind:
+          type: string
+          enum: [manual, scheduled]
+          description: Manual requests reuse an already active scheduled job when possible.
+        status:
+          type: string
+          enum: [scheduled, queued, processing, failed]
+        created_at:
+          type: string
+          format: date-time
+        deduplicated:
+          type: boolean
+          description: True when the request was attached to an existing active job.
     Incident:
       type: object
       required: [id, monitor_id, status, failure_count, first_failure_at, last_failure_at, alert_count, created_at, updated_at]

@@ -43,6 +43,7 @@ const (
 	defaultRabbitMQConnectTimeout   = 5 * time.Second
 	defaultRabbitMQReconnectInitial = time.Second
 	defaultRabbitMQReconnectMax     = 30 * time.Second
+	processingLeaseSafetyMargin     = 30 * time.Second
 )
 
 type Config struct {
@@ -132,7 +133,13 @@ func LoadConfig() (Config, error) {
 	cfg.SchedulerBatchSize = envInt("SCHEDULER_BATCH_SIZE", defaultSchedulerBatchSize, 1, 1000, &errs)
 	cfg.CheckInterval = envDuration("CHECK_INTERVAL", defaultCheckInterval, 30*time.Second, 24*time.Hour, &errs)
 	cfg.HTTPTimeout = envDuration("HTTP_TIMEOUT", defaultHTTPTimeout, time.Second, time.Minute, &errs)
-	cfg.CheckLeaseTimeout = envDuration("CHECK_LEASE_TIMEOUT", defaultCheckLeaseTimeout, cfg.HTTPTimeout+time.Second, 24*time.Hour, &errs)
+	cfg.CheckLeaseTimeout = envDuration(
+		"CHECK_LEASE_TIMEOUT",
+		defaultCheckLeaseTimeout,
+		time.Duration(maxMonitorTimeoutSeconds)*time.Second+processingLeaseSafetyMargin,
+		24*time.Hour,
+		&errs,
+	)
 	cfg.HealthAddr = envString("HEALTH_ADDR", defaultHealthAddr)
 	cfg.MaxRedirects = envInt("MAX_REDIRECTS", defaultMaxRedirects, 0, 10, &errs)
 	cfg.MaxBodyBytes = int64(envInt("MAX_BODY_BYTES", defaultMaxBodyBytes, 1024, 10*1024*1024, &errs))

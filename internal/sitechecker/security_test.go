@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"net/url"
 	"testing"
+	"time"
 )
 
 func TestNetworkPolicyBlocksPrivateAndMetadataAddresses(t *testing.T) {
@@ -74,5 +75,20 @@ func TestNetworkPolicyIPClassification(t *testing.T) {
 	}
 	if !policy.IsAllowedIP(netip.MustParseAddr("1.1.1.1")) {
 		t.Fatal("public IP is blocked")
+	}
+}
+
+func TestCheckHTTPClientUsesPerMonitorContextTimeout(t *testing.T) {
+	cfg := Config{
+		HTTPTimeout: 5 * time.Second,
+		WorkerCount: 1,
+		AllowedPorts: map[int]struct{}{
+			80:  {},
+			443: {},
+		},
+	}
+	client := NewCheckHTTPClient(cfg, NewNetworkPolicy(cfg))
+	if client.Timeout != 0 {
+		t.Fatalf("check client timeout = %s, want zero so monitor context owns the timeout", client.Timeout)
 	}
 }

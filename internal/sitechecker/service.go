@@ -74,6 +74,21 @@ func (s *MonitorService) ClaimDueJobs(ctx context.Context, limit int, now time.T
 	return s.repo.ClaimDueJobs(ctx, limit, now, leaseTimeout)
 }
 
+func (s *MonitorService) QueueManualCheck(ctx context.Context, id string, now time.Time) (ManualCheckJobReceipt, error) {
+	job, created, err := s.repo.CreateManualJob(ctx, id, now)
+	if err != nil {
+		return ManualCheckJobReceipt{}, err
+	}
+	return ManualCheckJobReceipt{
+		JobID:        job.ID,
+		MonitorID:    job.MonitorID,
+		Kind:         job.Kind,
+		Status:       job.Status,
+		CreatedAt:    job.CreatedAt,
+		Deduplicated: !created,
+	}, nil
+}
+
 func (s *MonitorService) MarkJobPublished(ctx context.Context, id, jobID string, now time.Time) error {
 	return s.repo.MarkJobPublished(ctx, id, jobID, now)
 }
@@ -82,50 +97,20 @@ func (s *MonitorService) ReleaseJobPublish(ctx context.Context, id, jobID, lastE
 	return s.repo.ReleaseJobPublish(ctx, id, jobID, lastError, now)
 }
 
-func (s *MonitorService) MarkProcessing(ctx context.Context, id, jobID string, attempt int, now time.Time, leaseTimeout time.Duration) error {
+func (s *MonitorService) MarkProcessing(ctx context.Context, id, jobID string, attempt int, now time.Time, leaseTimeout time.Duration) (ProcessingLease, error) {
 	return s.repo.MarkJobProcessing(ctx, id, jobID, attempt, now, leaseTimeout)
 }
 
-func (s *MonitorService) MarkJobFailed(ctx context.Context, id, jobID, lastError string, now, retryAt time.Time) error {
-	return s.repo.MarkJobFailed(ctx, id, jobID, lastError, now, retryAt)
+func (s *MonitorService) MarkJobFailed(ctx context.Context, lease ProcessingLease, lastError string, now, retryAt time.Time) error {
+	return s.repo.MarkJobFailed(ctx, lease, lastError, now, retryAt)
 }
 
-func (s *MonitorService) FailProcessing(ctx context.Context, id, jobID, lastError string, now, nextCheckAt time.Time) error {
-	return s.repo.MarkJobDead(ctx, id, jobID, lastError, now, nextCheckAt)
+func (s *MonitorService) FailProcessing(ctx context.Context, lease ProcessingLease, lastError string, now, nextCheckAt time.Time) error {
+	return s.repo.MarkJobDead(ctx, lease, lastError, now, nextCheckAt)
 }
 
-func (s *MonitorService) RunManualCheck(ctx context.Context, id string) (CheckRecord, error) {
-	monitor, err := s.repo.Get(ctx, id)
-	if err != nil {
-		return CheckRecord{}, err
-	}
-
-	checkCtx, cancel := context.WithTimeout(ctx, time.Duration(monitor.TimeoutSeconds)*time.Second)
-	defer cancel()
-
-	result := s.checker.CheckMonitor(checkCtx, monitor)
-	record := CheckRecordFromResult(result)
-	record.JobID = newID("manual")
-	if err := s.StoreManualCheckResult(ctx, record, result); err != nil {
-		return CheckRecord{}, err
-	}
-	return record, nil
-}
-
-func (s *MonitorService) StoreCheckResult(ctx context.Context, record CheckRecord, result CheckResult) error {
-	if _, err := s.repo.AddCheck(ctx, record, s.alertPolicy); err != nil {
-		if errors.Is(err, ErrDuplicateJob) {
-			return nil
-		}
-		return err
-	}
-
-	s.metrics.RecordResult(result)
-	return nil
-}
-
-func (s *MonitorService) StoreManualCheckResult(ctx context.Context, record CheckRecord, result CheckResult) error {
-	if _, err := s.repo.AddManualCheck(ctx, record, s.alertPolicy); err != nil {
+func (s *MonitorService) StoreCheckResult(ctx context.Context, record CheckRecord, result CheckResult, lease ProcessingLease) error {
+	if _, err := s.repo.AddCheck(ctx, record, lease, s.alertPolicy); err != nil {
 		if errors.Is(err, ErrDuplicateJob) {
 			return nil
 		}

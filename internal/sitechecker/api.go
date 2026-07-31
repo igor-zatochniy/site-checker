@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -133,12 +134,12 @@ func (h *APIHandler) listChecks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *APIHandler) runManualCheck(w http.ResponseWriter, r *http.Request) {
-	record, err := h.service.RunManualCheck(r.Context(), r.PathValue("id"))
+	receipt, err := h.service.QueueManualCheck(r.Context(), r.PathValue("id"), time.Now().UTC())
 	if err != nil {
 		h.writeStoreError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, record)
+	writeJSON(w, http.StatusAccepted, receipt)
 }
 
 func (h *APIHandler) getStats(w http.ResponseWriter, r *http.Request) {

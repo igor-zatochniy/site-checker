@@ -229,7 +229,8 @@ func handleQueueDelivery(ctx context.Context, workerID int, service *MonitorServ
 		return requeueInfrastructureFailure(ctx, delivery, err, workerID, "monitor lookup", logger)
 	}
 
-	if err := service.MarkProcessing(ctx, delivery.Job.MonitorID, delivery.Job.JobID, delivery.Job.Attempt, time.Now().UTC(), leaseTimeout); err != nil {
+	lease, err := service.MarkProcessing(ctx, delivery.Job.MonitorID, delivery.Job.JobID, delivery.Job.Attempt, time.Now().UTC(), leaseTimeout)
+	if err != nil {
 		if errors.Is(err, ErrStaleJob) || errors.Is(err, ErrJobAlreadyProcessing) || errors.Is(err, ErrMonitorNotFound) {
 			if ackErr := delivery.Ack(ctx); ackErr != nil {
 				logger.Warn("Failed to ack inactive job", "worker", workerID, "job_id", delivery.Job.JobID, "error", ackErr)
@@ -245,12 +246,12 @@ func handleQueueDelivery(ctx context.Context, workerID int, service *MonitorServ
 
 	record := CheckRecordFromResult(result)
 	record.JobID = delivery.Job.JobID
-	if err := service.StoreCheckResult(ctx, record, result); err != nil {
+	if err := service.StoreCheckResult(ctx, record, result, lease); err != nil {
 		if delivery.Retryable {
 			if stateErr := retryJobStateTransition(ctx, func(ctx context.Context) error {
 				now := time.Now().UTC()
 				retryAt := now.Add(checkJobRetryDelay(delivery.Job.Attempt))
-				return service.MarkJobFailed(ctx, delivery.Job.MonitorID, delivery.Job.JobID, "result persistence failed", now, retryAt)
+				return service.MarkJobFailed(ctx, lease, "result persistence failed", now, retryAt)
 			}); stateErr != nil {
 				if ackInactiveJob(ctx, delivery, stateErr, workerID, logger) {
 					return nil
@@ -266,7 +267,7 @@ func handleQueueDelivery(ctx context.Context, workerID int, service *MonitorServ
 			now := time.Now().UTC()
 			nextCheckAt := now.Add(time.Duration(monitor.IntervalSeconds) * time.Second)
 			if stateErr := retryJobStateTransition(ctx, func(ctx context.Context) error {
-				return service.FailProcessing(ctx, delivery.Job.MonitorID, delivery.Job.JobID, "result persistence failed", now, nextCheckAt)
+				return service.FailProcessing(ctx, lease, "result persistence failed", now, nextCheckAt)
 			}); stateErr != nil {
 				if ackInactiveJob(ctx, delivery, stateErr, workerID, logger) {
 					return nil

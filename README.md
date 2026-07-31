@@ -91,6 +91,8 @@ GET    /api/v1/monitors/{id}/stats
 GET    /api/v1/incidents
 ```
 
+`POST /api/v1/monitors/{id}/check` persists an asynchronous manual job and returns `202 Accepted`. The scheduler and workers process it through the same PostgreSQL and RabbitMQ lifecycle as periodic checks; the API role does not require external HTTP egress.
+
 If `API_KEY` is set, REST requests must include either:
 
 ```text
@@ -284,11 +286,11 @@ Expected demonstration:
 - The service keeps one binary and selects behavior through `APP_ROLE`. This keeps deployment artifacts simple while still allowing API, Scheduler, Worker, and Alert Dispatcher roles to scale independently.
 - `package main` is intentionally thin. Application code lives in `internal/sitechecker`, which gives the binary a clear boundary while keeping related internals close enough to refactor safely.
 - The repository and queue interfaces support both local in-memory mode and production PostgreSQL/RabbitMQ mode. In-memory mode is fast for development, but PostgreSQL and RabbitMQ are the durable path for multi-replica deployments.
-- PostgreSQL `check_jobs` is the authoritative job lifecycle: `scheduled → queued → processing → completed`, with explicit `failed` retry and terminal `dead` states. RabbitMQ transports job IDs, while database leases, attempts, retry availability, and terminal outcomes remain recoverable across process or broker restarts.
+- PostgreSQL `check_jobs` is the authoritative job lifecycle: `scheduled → queued → processing → completed`, with explicit `failed` retry and terminal `dead` states. Periodic and manual jobs share this pipeline. RabbitMQ transports job IDs, while database attempts and unique processing lease tokens fence stale workers from completing a newer attempt.
 - SSRF protection is implemented in application code and reinforced by Kubernetes NetworkPolicy. Application-level checks give portable behavior; network policy adds defense in depth in clusters.
 - A check result, incident transition, cooldown decision, and alert outbox insert share one PostgreSQL transaction. Webhook delivery is intentionally at-least-once; a stable `Idempotency-Key` lets receivers deduplicate the rare retry after an ambiguous network outcome.
 - Built-in demo URLs are opt-in. Normal deployments start with an empty monitor set to avoid sending unintended traffic to third-party websites.
-- RabbitMQ publication and consumption recover from runtime connection loss with bounded exponential backoff. Delivery remains at-least-once because a connection can fail after the broker accepted a publish or acknowledgement; persisted job states, monotonic attempts, unique result job IDs, and processing leases make those retry windows safe.
+- RabbitMQ publication and consumption recover from runtime connection loss with bounded exponential backoff. Delivery remains at-least-once because a connection can fail after the broker accepted a publish or acknowledgement; persisted job states, monotonic attempts, unique result job IDs, and fenced processing leases make those retry windows safe.
 - Kubernetes source manifests use a fixed readable tag for local rendering, while release CI produces a digest-pinned deployment bundle so production rollouts reference immutable image content.
 
 ## Known limitations
@@ -320,12 +322,12 @@ Expected demonstration:
 | `DEAD_LETTER_QUEUE_NAME` | `site_checker.checks.dead` | RabbitMQ dead-letter queue. |
 | `QUEUE_BUFFER_SIZE` | `1000` | In-memory queue buffer size. |
 | `QUEUE_PREFETCH` | `10` | RabbitMQ consumer prefetch. |
-| `MAX_JOB_ATTEMPTS` | `3` | Retry attempts before dead-lettering infrastructure failures. |
+| `MAX_JOB_ATTEMPTS` | `3` | Processing attempts before a persistently failing job reaches the dead-letter queue. |
 | `WORKER_COUNT` | `10` | Number of worker goroutines in each worker process. |
 | `SCHEDULER_BATCH_SIZE` | `100` | Number of due monitors claimed per scheduler tick. |
-| `CHECK_LEASE_TIMEOUT` | `2m` | Bounds publication, queued-delivery, and processing recovery leases. It must exceed `HTTP_TIMEOUT`; expired jobs move through persisted retry state before republishing. |
+| `CHECK_LEASE_TIMEOUT` | `2m` | Bounds publication, queued-delivery, and processing recovery leases. It must be at least 90 seconds: the maximum 60-second monitor timeout plus a 30-second persistence margin. |
 | `CHECK_INTERVAL` | `5m` | Default interval for seeded monitors. |
-| `HTTP_TIMEOUT` | `5s` | Default timeout for outbound checks. |
+| `HTTP_TIMEOUT` | `5s` | Default `timeout_seconds` for seeded monitors. Each monitor context owns its actual timeout; this value is not a global client cap. |
 | `HEALTH_ADDR` | `:8080` | Address for REST, health, and metrics endpoints. |
 | `SEED_URLS_FILE` | empty | Explicit path to a newline file or JSON array with seed URLs. Only `all` and `scheduler` roles seed monitors. |
 | `SEED_DEFAULT_LINKS` | `false` | Enables built-in demo seed links. Keep disabled for normal deployments. |

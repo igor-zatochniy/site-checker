@@ -164,13 +164,13 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 	}
 }
 
-func TestLoadConfigRejectsCheckLeaseWithoutTimeoutMargin(t *testing.T) {
+func TestLoadConfigRejectsCheckLeaseBelowMaximumMonitorTimeoutMargin(t *testing.T) {
 	cleanConfigEnv(t)
 	t.Setenv("HTTP_TIMEOUT", "5s")
-	t.Setenv("CHECK_LEASE_TIMEOUT", "5s")
+	t.Setenv("CHECK_LEASE_TIMEOUT", "89s")
 
 	if _, err := LoadConfig(); err == nil {
-		t.Fatal("expected CHECK_LEASE_TIMEOUT equal to HTTP_TIMEOUT to be rejected")
+		t.Fatal("expected CHECK_LEASE_TIMEOUT below maximum monitor timeout margin to be rejected")
 	}
 }
 
@@ -179,7 +179,7 @@ func TestLoadConfigAcceptsOverrides(t *testing.T) {
 	t.Setenv("WORKER_COUNT", "4")
 	t.Setenv("CHECK_INTERVAL", "45s")
 	t.Setenv("HTTP_TIMEOUT", "2s")
-	t.Setenv("CHECK_LEASE_TIMEOUT", "30s")
+	t.Setenv("CHECK_LEASE_TIMEOUT", "2m")
 	t.Setenv("EXPECTED_STATUS", "200-204,301")
 	t.Setenv("ALLOWED_PORTS", "80,443,8443")
 	t.Setenv("APP_ROLE", "worker")
@@ -223,8 +223,8 @@ func TestLoadConfigAcceptsOverrides(t *testing.T) {
 	if cfg.RabbitMQConnectTimeout != 3*time.Second || cfg.RabbitMQReconnectMax != 10*time.Second {
 		t.Fatalf("RabbitMQ reconnect config = timeout:%s max:%s", cfg.RabbitMQConnectTimeout, cfg.RabbitMQReconnectMax)
 	}
-	if cfg.CheckLeaseTimeout != 30*time.Second {
-		t.Fatalf("CheckLeaseTimeout = %s, want 30s", cfg.CheckLeaseTimeout)
+	if cfg.CheckLeaseTimeout != 2*time.Minute {
+		t.Fatalf("CheckLeaseTimeout = %s, want 2m", cfg.CheckLeaseTimeout)
 	}
 	if !cfg.ExpectedStatus.Allows(301) {
 		t.Fatalf("status policy does not allow 301")

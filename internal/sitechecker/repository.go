@@ -14,14 +14,14 @@ type MonitorRepository interface {
 	Get(ctx context.Context, id string) (Monitor, error)
 	Update(ctx context.Context, id string, patch MonitorPatch) (Monitor, error)
 	Delete(ctx context.Context, id string) error
+	CreateManualJob(ctx context.Context, id string, now time.Time) (CheckJobRecord, bool, error)
 	ClaimDueJobs(ctx context.Context, limit int, now time.Time, leaseTimeout time.Duration) ([]CheckJobRecord, error)
 	MarkJobPublished(ctx context.Context, id, jobID string, now time.Time) error
 	ReleaseJobPublish(ctx context.Context, id, jobID, lastError string, now time.Time) error
-	MarkJobProcessing(ctx context.Context, id, jobID string, attempt int, now time.Time, leaseTimeout time.Duration) error
-	MarkJobFailed(ctx context.Context, id, jobID, lastError string, now, retryAt time.Time) error
-	MarkJobDead(ctx context.Context, id, jobID, lastError string, now, nextCheckAt time.Time) error
-	AddCheck(ctx context.Context, record CheckRecord, alertPolicy AlertPolicy) (Monitor, error)
-	AddManualCheck(ctx context.Context, record CheckRecord, alertPolicy AlertPolicy) (Monitor, error)
+	MarkJobProcessing(ctx context.Context, id, jobID string, attempt int, now time.Time, leaseTimeout time.Duration) (ProcessingLease, error)
+	MarkJobFailed(ctx context.Context, lease ProcessingLease, lastError string, now, retryAt time.Time) error
+	MarkJobDead(ctx context.Context, lease ProcessingLease, lastError string, now, nextCheckAt time.Time) error
+	AddCheck(ctx context.Context, record CheckRecord, lease ProcessingLease, alertPolicy AlertPolicy) (Monitor, error)
 	ListChecks(ctx context.Context, id string, offset, limit int) ([]CheckRecord, int, error)
 	Stats(ctx context.Context, id string) (MonitorStats, error)
 	ListIncidents(ctx context.Context, status string, offset, limit int) ([]Incident, int, error)
@@ -68,6 +68,10 @@ func (r *InMemoryMonitorRepository) Delete(_ context.Context, id string) error {
 	return r.store.Delete(id)
 }
 
+func (r *InMemoryMonitorRepository) CreateManualJob(_ context.Context, id string, now time.Time) (CheckJobRecord, bool, error) {
+	return r.store.CreateManualJob(id, now)
+}
+
 func (r *InMemoryMonitorRepository) ClaimDueJobs(_ context.Context, limit int, now time.Time, leaseTimeout time.Duration) ([]CheckJobRecord, error) {
 	return r.store.ClaimDueJobs(limit, now, leaseTimeout), nil
 }
@@ -80,24 +84,20 @@ func (r *InMemoryMonitorRepository) ReleaseJobPublish(_ context.Context, id, job
 	return r.store.ReleaseJobPublish(id, jobID, lastError, now)
 }
 
-func (r *InMemoryMonitorRepository) MarkJobProcessing(_ context.Context, id, jobID string, attempt int, now time.Time, leaseTimeout time.Duration) error {
+func (r *InMemoryMonitorRepository) MarkJobProcessing(_ context.Context, id, jobID string, attempt int, now time.Time, leaseTimeout time.Duration) (ProcessingLease, error) {
 	return r.store.MarkJobProcessing(id, jobID, attempt, now, leaseTimeout)
 }
 
-func (r *InMemoryMonitorRepository) MarkJobFailed(_ context.Context, id, jobID, lastError string, now, retryAt time.Time) error {
-	return r.store.MarkJobFailed(id, jobID, lastError, now, retryAt)
+func (r *InMemoryMonitorRepository) MarkJobFailed(_ context.Context, lease ProcessingLease, lastError string, now, retryAt time.Time) error {
+	return r.store.MarkJobFailed(lease, lastError, now, retryAt)
 }
 
-func (r *InMemoryMonitorRepository) MarkJobDead(_ context.Context, id, jobID, lastError string, now, nextCheckAt time.Time) error {
-	return r.store.MarkJobDead(id, jobID, lastError, now, nextCheckAt)
+func (r *InMemoryMonitorRepository) MarkJobDead(_ context.Context, lease ProcessingLease, lastError string, now, nextCheckAt time.Time) error {
+	return r.store.MarkJobDead(lease, lastError, now, nextCheckAt)
 }
 
-func (r *InMemoryMonitorRepository) AddCheck(_ context.Context, record CheckRecord, _ AlertPolicy) (Monitor, error) {
-	return r.store.AddCheck(record)
-}
-
-func (r *InMemoryMonitorRepository) AddManualCheck(_ context.Context, record CheckRecord, _ AlertPolicy) (Monitor, error) {
-	return r.store.AddManualCheck(record)
+func (r *InMemoryMonitorRepository) AddCheck(_ context.Context, record CheckRecord, lease ProcessingLease, _ AlertPolicy) (Monitor, error) {
+	return r.store.AddCheck(record, lease)
 }
 
 func (r *InMemoryMonitorRepository) ListChecks(_ context.Context, id string, offset, limit int) ([]CheckRecord, int, error) {

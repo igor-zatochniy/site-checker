@@ -58,6 +58,13 @@ func NewSecureTransport(cfg Config, policy *NetworkPolicy) *http.Transport {
 	}
 }
 
+func NewCheckHTTPClient(cfg Config, policy *NetworkPolicy) *http.Client {
+	return &http.Client{
+		Transport:     NewSecureTransport(cfg, policy),
+		CheckRedirect: policy.CheckRedirect,
+	}
+}
+
 func (p *NetworkPolicy) ValidateURL(raw string) error {
 	parsed, err := url.Parse(raw)
 	if err != nil {

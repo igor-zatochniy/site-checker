@@ -412,7 +412,7 @@ type retryOnceRepository struct {
 	addCheckCount    int
 }
 
-func (r *retryOnceRepository) AddCheck(ctx context.Context, record CheckRecord, alertPolicy AlertPolicy) (Monitor, error) {
+func (r *retryOnceRepository) AddCheck(ctx context.Context, record CheckRecord, lease ProcessingLease, alertPolicy AlertPolicy) (Monitor, error) {
 	r.mu.Lock()
 	r.addCheckCount++
 	fail := r.failNextAddCheck
@@ -423,7 +423,7 @@ func (r *retryOnceRepository) AddCheck(ctx context.Context, record CheckRecord, 
 	if fail {
 		return Monitor{}, errors.New("transient storage failure")
 	}
-	return r.InMemoryMonitorRepository.AddCheck(ctx, record, alertPolicy)
+	return r.InMemoryMonitorRepository.AddCheck(ctx, record, lease, alertPolicy)
 }
 
 func (r *retryOnceRepository) addCheckAttempts() int {
@@ -439,14 +439,14 @@ type failingLeaseTransitionRepository struct {
 	markFailedCount int
 }
 
-func (r *failingLeaseTransitionRepository) AddCheck(context.Context, CheckRecord, AlertPolicy) (Monitor, error) {
+func (r *failingLeaseTransitionRepository) AddCheck(context.Context, CheckRecord, ProcessingLease, AlertPolicy) (Monitor, error) {
 	r.mu.Lock()
 	r.addCheckCount++
 	r.mu.Unlock()
 	return Monitor{}, errors.New("transient storage failure")
 }
 
-func (r *failingLeaseTransitionRepository) MarkJobFailed(context.Context, string, string, string, time.Time, time.Time) error {
+func (r *failingLeaseTransitionRepository) MarkJobFailed(context.Context, ProcessingLease, string, time.Time, time.Time) error {
 	r.mu.Lock()
 	r.markFailedCount++
 	r.mu.Unlock()

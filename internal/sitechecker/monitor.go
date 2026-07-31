@@ -33,6 +33,10 @@ const (
 	checkJobStatusCompleted  = "completed"
 	checkJobStatusFailed     = "failed"
 	checkJobStatusDead       = "dead"
+	checkJobKindScheduled    = "scheduled"
+	checkJobKindManual       = "manual"
+	minMonitorTimeoutSeconds = 1
+	maxMonitorTimeoutSeconds = 60
 	maxChecksPerMonitor      = 500
 	maxProcessedJobIDs       = 10_000
 	maxRetainedCheckJobs     = 10_000
@@ -69,6 +73,7 @@ type CheckRecord struct {
 type CheckJobRecord struct {
 	ID                  string
 	MonitorID           string
+	Kind                string
 	ScheduledFor        time.Time
 	Status              string
 	Attempt             int
@@ -76,10 +81,27 @@ type CheckJobRecord struct {
 	PublishedAt         time.Time
 	ProcessingStartedAt time.Time
 	LeaseExpiresAt      time.Time
+	LeaseToken          string
 	CompletedAt         time.Time
 	LastError           string
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
+}
+
+type ProcessingLease struct {
+	JobID      string
+	MonitorID  string
+	Attempt    int
+	LeaseToken string
+}
+
+type ManualCheckJobReceipt struct {
+	JobID        string    `json:"job_id"`
+	MonitorID    string    `json:"monitor_id"`
+	Kind         string    `json:"kind"`
+	Status       string    `json:"status"`
+	CreatedAt    time.Time `json:"created_at"`
+	Deduplicated bool      `json:"deduplicated"`
 }
 
 type Incident struct {
@@ -370,6 +392,7 @@ func (s *MonitorStore) ClaimDueJobs(limit int, now time.Time, leaseTimeout time.
 		job.AvailableAt = now
 		job.ProcessingStartedAt = time.Time{}
 		job.LeaseExpiresAt = time.Time{}
+		job.LeaseToken = ""
 		job.UpdatedAt = now
 		s.checkJobs[jobID] = job
 	}
@@ -437,6 +460,7 @@ func (s *MonitorStore) ClaimDueJobs(limit int, now time.Time, leaseTimeout time.
 		job := CheckJobRecord{
 			ID:             NewCheckJobID(monitor.ID, monitor.NextCheckAt),
 			MonitorID:      monitor.ID,
+			Kind:           checkJobKindScheduled,
 			ScheduledFor:   monitor.NextCheckAt.UTC(),
 			Status:         checkJobStatusScheduled,
 			AvailableAt:    now,
@@ -449,6 +473,37 @@ func (s *MonitorStore) ClaimDueJobs(limit int, now time.Time, leaseTimeout time.
 		claimed = append(claimed, job)
 	}
 	return claimed
+}
+
+func (s *MonitorStore) CreateManualJob(id string, now time.Time) (CheckJobRecord, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.byID[id]; !exists {
+		return CheckJobRecord{}, false, ErrMonitorNotFound
+	}
+	if jobID, exists := s.activeJobByMonitor[id]; exists {
+		job, jobExists := s.checkJobs[jobID]
+		if jobExists {
+			return job, false, nil
+		}
+		delete(s.activeJobByMonitor, id)
+	}
+
+	now = now.UTC()
+	job := CheckJobRecord{
+		ID:           newID("job"),
+		MonitorID:    id,
+		Kind:         checkJobKindManual,
+		ScheduledFor: now,
+		Status:       checkJobStatusScheduled,
+		AvailableAt:  now,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	s.checkJobs[job.ID] = job
+	s.activeJobByMonitor[id] = job.ID
+	return job, true, nil
 }
 
 func (s *MonitorStore) MarkJobPublished(id, jobID string, now time.Time) error {
@@ -492,29 +547,29 @@ func (s *MonitorStore) ReleaseJobPublish(id, jobID, lastError string, now time.T
 	return nil
 }
 
-func (s *MonitorStore) MarkJobProcessing(id, jobID string, attempt int, now time.Time, leaseTimeout time.Duration) error {
+func (s *MonitorStore) MarkJobProcessing(id, jobID string, attempt int, now time.Time, leaseTimeout time.Duration) (ProcessingLease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	job, err := s.activeJobLocked(id, jobID)
 	if err != nil {
-		return err
+		return ProcessingLease{}, err
 	}
 	now = now.UTC()
 	switch job.Status {
 	case checkJobStatusScheduled, checkJobStatusQueued:
 		if attempt <= job.Attempt {
-			return ErrStaleJob
+			return ProcessingLease{}, ErrStaleJob
 		}
 	case checkJobStatusProcessing:
 		if job.LeaseExpiresAt.IsZero() || job.LeaseExpiresAt.After(now) {
-			return ErrJobAlreadyProcessing
+			return ProcessingLease{}, ErrJobAlreadyProcessing
 		}
 		if attempt < job.Attempt {
-			return ErrStaleJob
+			return ProcessingLease{}, ErrStaleJob
 		}
 	default:
-		return ErrStaleJob
+		return ProcessingLease{}, ErrStaleJob
 	}
 	if leaseTimeout <= 0 {
 		leaseTimeout = time.Minute
@@ -523,20 +578,21 @@ func (s *MonitorStore) MarkJobProcessing(id, jobID string, attempt int, now time
 	job.Attempt = max(job.Attempt, max(attempt, 1))
 	job.ProcessingStartedAt = now
 	job.LeaseExpiresAt = now.Add(leaseTimeout)
+	job.LeaseToken = newID("lease")
 	job.UpdatedAt = now
 	s.checkJobs[jobID] = job
-	return nil
+	return ProcessingLease{JobID: jobID, MonitorID: id, Attempt: job.Attempt, LeaseToken: job.LeaseToken}, nil
 }
 
-func (s *MonitorStore) MarkJobFailed(id, jobID, lastError string, now, retryAt time.Time) error {
+func (s *MonitorStore) MarkJobFailed(lease ProcessingLease, lastError string, now, retryAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	job, err := s.activeJobLocked(id, jobID)
+	job, err := s.activeJobLocked(lease.MonitorID, lease.JobID)
 	if err != nil {
 		return err
 	}
-	if job.Status != checkJobStatusProcessing {
+	if !jobOwnsLease(job, lease) {
 		return ErrStaleJob
 	}
 	retryAt = retryAt.UTC()
@@ -545,26 +601,27 @@ func (s *MonitorStore) MarkJobFailed(id, jobID, lastError string, now, retryAt t
 	job.AvailableAt = retryAt
 	job.ProcessingStartedAt = time.Time{}
 	job.LeaseExpiresAt = time.Time{}
+	job.LeaseToken = ""
 	job.LastError = lastError
 	job.UpdatedAt = now
-	s.checkJobs[jobID] = job
+	s.checkJobs[lease.JobID] = job
 	return nil
 }
 
-func (s *MonitorStore) MarkJobDead(id, jobID, lastError string, now, nextCheckAt time.Time) error {
+func (s *MonitorStore) MarkJobDead(lease ProcessingLease, lastError string, now, nextCheckAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	monitor, exists := s.byID[id]
+	monitor, exists := s.byID[lease.MonitorID]
 	if !exists {
 		return ErrMonitorNotFound
 	}
 
-	job, err := s.activeJobLocked(id, jobID)
+	job, err := s.activeJobLocked(lease.MonitorID, lease.JobID)
 	if err != nil {
 		return err
 	}
-	if job.Status != checkJobStatusProcessing {
+	if !jobOwnsLease(job, lease) {
 		return ErrStaleJob
 	}
 
@@ -573,15 +630,27 @@ func (s *MonitorStore) MarkJobDead(id, jobID, lastError string, now, nextCheckAt
 	job.CompletedAt = now
 	job.ProcessingStartedAt = time.Time{}
 	job.LeaseExpiresAt = time.Time{}
+	job.LeaseToken = ""
 	job.LastError = lastError
 	job.UpdatedAt = now
-	s.checkJobs[jobID] = job
-	delete(s.activeJobByMonitor, id)
-	s.rememberTerminalJobLocked(jobID)
-	monitor.NextCheckAt = nextCheckAt.UTC()
-	monitor.UpdatedAt = now
-	s.byID[id] = monitor
+	s.checkJobs[lease.JobID] = job
+	delete(s.activeJobByMonitor, lease.MonitorID)
+	s.rememberTerminalJobLocked(lease.JobID)
+	if job.Kind == checkJobKindScheduled {
+		monitor.NextCheckAt = nextCheckAt.UTC()
+		monitor.UpdatedAt = now
+		s.byID[lease.MonitorID] = monitor
+	}
 	return nil
+}
+
+func jobOwnsLease(job CheckJobRecord, lease ProcessingLease) bool {
+	return job.Status == checkJobStatusProcessing &&
+		job.ID == lease.JobID &&
+		job.MonitorID == lease.MonitorID &&
+		job.Attempt == lease.Attempt &&
+		job.LeaseToken != "" &&
+		job.LeaseToken == lease.LeaseToken
 }
 
 func (s *MonitorStore) CheckJob(jobID string) (CheckJobRecord, error) {
@@ -625,6 +694,7 @@ func (s *MonitorStore) finishActiveJobLocked(monitorID, status, lastError string
 	job.LastError = lastError
 	job.ProcessingStartedAt = time.Time{}
 	job.LeaseExpiresAt = time.Time{}
+	job.LeaseToken = ""
 	job.UpdatedAt = now
 	if status == checkJobStatusCompleted || status == checkJobStatusDead {
 		job.CompletedAt = now
@@ -638,7 +708,7 @@ func (s *MonitorStore) finishActiveJobLocked(monitorID, status, lastError string
 	s.checkJobs[jobID] = job
 }
 
-func (s *MonitorStore) AddCheck(record CheckRecord) (Monitor, error) {
+func (s *MonitorStore) AddCheck(record CheckRecord, lease ProcessingLease) (Monitor, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -656,7 +726,7 @@ func (s *MonitorStore) AddCheck(record CheckRecord) (Monitor, error) {
 	if job.Status == checkJobStatusCompleted {
 		return monitor, ErrDuplicateJob
 	}
-	if job.Status != checkJobStatusProcessing {
+	if !jobOwnsLease(job, lease) {
 		return Monitor{}, ErrStaleJob
 	}
 	if _, exists := s.processedJobs[record.JobID]; exists {
@@ -669,6 +739,7 @@ func (s *MonitorStore) AddCheck(record CheckRecord) (Monitor, error) {
 	job.CompletedAt = now
 	job.ProcessingStartedAt = time.Time{}
 	job.LeaseExpiresAt = time.Time{}
+	job.LeaseToken = ""
 	job.LastError = ""
 	job.UpdatedAt = now
 	s.checkJobs[record.JobID] = job
@@ -678,39 +749,9 @@ func (s *MonitorStore) AddCheck(record CheckRecord) (Monitor, error) {
 	monitor.LastLatencyMS = record.LatencyMS
 	monitor.LastCheckedAt = record.CheckedAt
 	monitor.LastError = record.Error
-	monitor.NextCheckAt = now.Add(time.Duration(monitor.IntervalSeconds) * time.Second)
-	monitor.UpdatedAt = now
-	s.byID[record.MonitorID] = monitor
-
-	records := append(s.checks[record.MonitorID], record)
-	if len(records) > maxChecksPerMonitor {
-		records = records[len(records)-maxChecksPerMonitor:]
+	if job.Kind == checkJobKindScheduled {
+		monitor.NextCheckAt = now.Add(time.Duration(monitor.IntervalSeconds) * time.Second)
 	}
-	s.checks[record.MonitorID] = records
-	s.updateIncident(record, now)
-	return monitor, nil
-}
-
-func (s *MonitorStore) AddManualCheck(record CheckRecord) (Monitor, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	monitor, exists := s.byID[record.MonitorID]
-	if !exists {
-		return Monitor{}, ErrMonitorNotFound
-	}
-	if record.JobID != "" {
-		if _, exists := s.processedJobs[record.JobID]; exists {
-			return monitor, ErrDuplicateJob
-		}
-		s.rememberProcessedJobLocked(record.JobID)
-	}
-
-	now := time.Now().UTC()
-	monitor.LastStatusCode = record.StatusCode
-	monitor.LastLatencyMS = record.LatencyMS
-	monitor.LastCheckedAt = record.CheckedAt
-	monitor.LastError = record.Error
 	monitor.UpdatedAt = now
 	s.byID[record.MonitorID] = monitor
 
@@ -908,7 +949,7 @@ func validateMonitorInput(input MonitorInput, policy *NetworkPolicy) error {
 	if input.IntervalSeconds < 30 || input.IntervalSeconds > 86400 {
 		return fmt.Errorf("%w: interval_seconds must be between 30 and 86400", ErrInvalidMonitor)
 	}
-	if input.TimeoutSeconds < 1 || input.TimeoutSeconds > 60 {
+	if input.TimeoutSeconds < minMonitorTimeoutSeconds || input.TimeoutSeconds > maxMonitorTimeoutSeconds {
 		return fmt.Errorf("%w: timeout_seconds must be between 1 and 60", ErrInvalidMonitor)
 	}
 	if input.ExpectedStatus < 100 || input.ExpectedStatus > 599 {

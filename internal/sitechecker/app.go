@@ -65,11 +65,7 @@ func Main(version, commit, buildDate string) {
 		logger.Info("No seed URLs configured")
 	}
 
-	checkClient := &http.Client{
-		Transport:     NewSecureTransport(cfg, policy),
-		Timeout:       cfg.HTTPTimeout,
-		CheckRedirect: policy.CheckRedirect,
-	}
+	checkClient := NewCheckHTTPClient(cfg, policy)
 	checker := NewChecker(checkClient, cfg, metrics)
 	alertPolicy := AlertPolicy{
 		Enabled:          cfg.AlertWebhookURL != "",
