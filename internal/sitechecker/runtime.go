@@ -98,7 +98,7 @@ func RunQueueScheduler(ctx context.Context, service *MonitorService, queue JobQu
 	defer ticker.Stop()
 
 	for {
-		enqueueDueMonitorJobs(ctx, service, queue, cfg.SchedulerBatchSize, cfg.CheckLeaseTimeout, logger)
+		enqueueDueMonitorJobs(ctx, service, queue, cfg.SchedulerBatchSize, cfg.CheckLeaseTimeout, cfg.MaxJobAttempts, logger)
 
 		select {
 		case <-ctx.Done():
@@ -109,9 +109,9 @@ func RunQueueScheduler(ctx context.Context, service *MonitorService, queue JobQu
 	}
 }
 
-func enqueueDueMonitorJobs(ctx context.Context, service *MonitorService, queue JobQueue, limit int, leaseTimeout time.Duration, logger *slog.Logger) {
+func enqueueDueMonitorJobs(ctx context.Context, service *MonitorService, queue JobQueue, limit int, leaseTimeout time.Duration, maxAttempts int, logger *slog.Logger) {
 	now := time.Now().UTC()
-	jobs, err := service.ClaimDueJobs(ctx, limit, now, leaseTimeout)
+	jobs, err := service.ClaimDueJobs(ctx, limit, now, leaseTimeout, maxAttempts)
 	if err != nil {
 		logger.Warn("Failed to claim due check jobs", "error", err)
 		return

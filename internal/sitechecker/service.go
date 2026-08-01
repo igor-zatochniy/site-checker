@@ -70,8 +70,8 @@ func (s *MonitorService) ListIncidents(ctx context.Context, status string, offse
 	return s.repo.ListIncidents(ctx, status, offset, limit)
 }
 
-func (s *MonitorService) ClaimDueJobs(ctx context.Context, limit int, now time.Time, leaseTimeout time.Duration) ([]CheckJobRecord, error) {
-	return s.repo.ClaimDueJobs(ctx, limit, now, leaseTimeout)
+func (s *MonitorService) ClaimDueJobs(ctx context.Context, limit int, now time.Time, leaseTimeout time.Duration, maxAttempts int) ([]CheckJobRecord, error) {
+	return s.repo.ClaimDueJobs(ctx, limit, now, leaseTimeout, maxAttempts)
 }
 
 func (s *MonitorService) QueueManualCheck(ctx context.Context, id string, now time.Time) (ManualCheckJobReceipt, error) {

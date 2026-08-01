@@ -40,6 +40,7 @@ services:
       QUEUE_TYPE: rabbitmq
       RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/"
       API_KEY: ${API_KEY}
+      AUTH_DISABLED: ${AUTH_DISABLED:-false}
       ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL:-}"
       HEALTH_ADDR: :8080
     ports:

@@ -368,6 +368,10 @@ func (s *MonitorStore) Delete(id string) error {
 }
 
 func (s *MonitorStore) ClaimDueJobs(limit int, now time.Time, leaseTimeout time.Duration) []CheckJobRecord {
+	return s.ClaimDueJobsWithMaxAttempts(limit, now, leaseTimeout, defaultMaxJobAttempts)
+}
+
+func (s *MonitorStore) ClaimDueJobsWithMaxAttempts(limit int, now time.Time, leaseTimeout time.Duration, maxAttempts int) []CheckJobRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -378,14 +382,24 @@ func (s *MonitorStore) ClaimDueJobs(limit int, now time.Time, leaseTimeout time.
 	if leaseTimeout <= 0 {
 		leaseTimeout = time.Minute
 	}
+	if maxAttempts <= 0 {
+		maxAttempts = defaultMaxJobAttempts
+	}
 
 	for jobID, job := range s.checkJobs {
+		var recoveryError string
 		switch {
 		case job.Status == checkJobStatusProcessing && !job.LeaseExpiresAt.IsZero() && !job.LeaseExpiresAt.After(now):
-			job.LastError = "processing lease expired"
+			recoveryError = "processing lease expired"
 		case job.Status == checkJobStatusQueued && !job.PublishedAt.IsZero() && !job.PublishedAt.Add(leaseTimeout).After(now):
-			job.LastError = "queued delivery lease expired"
+			recoveryError = "queued delivery lease expired"
+		case job.Status == checkJobStatusFailed && !job.AvailableAt.After(now):
+			recoveryError = "maximum processing attempts reached"
 		default:
+			continue
+		}
+		if job.Attempt >= maxAttempts {
+			s.finishExhaustedJobLocked(jobID, job, recoveryError, now)
 			continue
 		}
 		job.Status = checkJobStatusFailed
@@ -393,6 +407,7 @@ func (s *MonitorStore) ClaimDueJobs(limit int, now time.Time, leaseTimeout time.
 		job.ProcessingStartedAt = time.Time{}
 		job.LeaseExpiresAt = time.Time{}
 		job.LeaseToken = ""
+		job.LastError = recoveryError
 		job.UpdatedAt = now
 		s.checkJobs[jobID] = job
 	}
@@ -400,6 +415,9 @@ func (s *MonitorStore) ClaimDueJobs(limit int, now time.Time, leaseTimeout time.
 	candidates := make([]CheckJobRecord, 0, len(s.checkJobs))
 	for _, job := range s.checkJobs {
 		if job.Status != checkJobStatusScheduled && job.Status != checkJobStatusFailed {
+			continue
+		}
+		if job.Attempt >= maxAttempts {
 			continue
 		}
 		if job.AvailableAt.After(now) {
@@ -473,6 +491,32 @@ func (s *MonitorStore) ClaimDueJobs(limit int, now time.Time, leaseTimeout time.
 		claimed = append(claimed, job)
 	}
 	return claimed
+}
+
+func (s *MonitorStore) finishExhaustedJobLocked(jobID string, job CheckJobRecord, recoveryError string, now time.Time) {
+	job.Status = checkJobStatusDead
+	job.CompletedAt = now
+	job.ProcessingStartedAt = time.Time{}
+	job.LeaseExpiresAt = time.Time{}
+	job.LeaseToken = ""
+	job.LastError = recoveryError + "; maximum attempts reached"
+	job.UpdatedAt = now
+	s.checkJobs[jobID] = job
+	if s.activeJobByMonitor[job.MonitorID] == jobID {
+		delete(s.activeJobByMonitor, job.MonitorID)
+	}
+	s.rememberTerminalJobLocked(jobID)
+
+	if job.Kind != checkJobKindScheduled {
+		return
+	}
+	monitor, exists := s.byID[job.MonitorID]
+	if !exists {
+		return
+	}
+	monitor.NextCheckAt = now.Add(time.Duration(monitor.IntervalSeconds) * time.Second)
+	monitor.UpdatedAt = now
+	s.byID[job.MonitorID] = monitor
 }
 
 func (s *MonitorStore) CreateManualJob(id string, now time.Time) (CheckJobRecord, bool, error) {

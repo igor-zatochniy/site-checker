@@ -189,7 +189,7 @@ func TestRunQueueWorkersRetriesFromPersistedFailedState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	claimed, err := service.ClaimDueJobs(ctx, 1, time.Now().UTC(), time.Minute)
+	claimed, err := service.ClaimDueJobs(ctx, 1, time.Now().UTC(), time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func TestHandleQueueDeliveryDoesNotRetryBeforeLeaseStateChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	claimed, err := service.ClaimDueJobs(ctx, 1, time.Now().UTC(), time.Minute)
+	claimed, err := service.ClaimDueJobs(ctx, 1, time.Now().UTC(), time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}

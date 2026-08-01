@@ -58,7 +58,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	claimed, err := repo.ClaimDueJobs(ctx, 10, now, time.Minute)
+	claimed, err := repo.ClaimDueJobs(ctx, 10, now, time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	secondClaim, err := repo.ClaimDueJobs(ctx, 10, now.Add(30*time.Second), time.Minute)
+	secondClaim, err := repo.ClaimDueJobs(ctx, 10, now.Add(30*time.Second), time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 		t.Fatalf("second MarkJobProcessing error = %v, want ErrJobAlreadyProcessing", err)
 	}
 
-	reclaimed, err := repo.ClaimDueJobs(ctx, 10, now.Add(2*time.Minute), time.Minute)
+	reclaimed, err := repo.ClaimDueJobs(ctx, 10, now.Add(2*time.Minute), time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,14 +112,14 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if err := repo.MarkJobFailed(ctx, retryLease, "temporary storage failure", now.Add(2*time.Minute+3*time.Second), jobRetryAt); err != nil {
 		t.Fatal(err)
 	}
-	beforeRetry, err := repo.ClaimDueJobs(ctx, 10, jobRetryAt.Add(-time.Millisecond), time.Minute)
+	beforeRetry, err := repo.ClaimDueJobs(ctx, 10, jobRetryAt.Add(-time.Millisecond), time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(beforeRetry) != 0 {
 		t.Fatalf("jobs before retry = %+v, want none", beforeRetry)
 	}
-	retryJobs, err := repo.ClaimDueJobs(ctx, 10, jobRetryAt, time.Minute)
+	retryJobs, err := repo.ClaimDueJobs(ctx, 10, jobRetryAt, time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 		t.Fatalf("manual check moved next_check_at to %s, want %s", manualUpdated.NextCheckAt, manualLeaseMonitor.NextCheckAt)
 	}
 
-	manualClaimed, err := repo.ClaimDueJobs(ctx, 10, manualNow.Add(30*time.Second), time.Minute)
+	manualClaimed, err := repo.ClaimDueJobs(ctx, 10, manualNow.Add(30*time.Second), time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	failNow := time.Now().UTC()
-	failClaimed, err := repo.ClaimDueJobs(ctx, 10, failNow, time.Minute)
+	failClaimed, err := repo.ClaimDueJobs(ctx, 10, failNow, time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,6 +366,82 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	}
 	if deadJob.Status != checkJobStatusDead || deadJob.CompletedAt.IsZero() {
 		t.Fatalf("dead job = %+v", deadJob)
+	}
+
+	attemptLimitMonitor, err := repo.Create(ctx, MonitorInput{
+		URL:             "https://attempt-limit.example.com",
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptNow := time.Now().UTC()
+	attemptJobs, err := repo.ClaimDueJobs(ctx, 100, attemptNow, time.Minute, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptJobID := findClaimedJobID(attemptJobs, attemptLimitMonitor.ID)
+	if attemptJobID == "" {
+		t.Fatalf("attempt-limit monitor was not claimed: %+v", attemptJobs)
+	}
+	if err := repo.MarkJobPublished(ctx, attemptLimitMonitor.ID, attemptJobID, attemptNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.MarkJobProcessing(ctx, attemptLimitMonitor.ID, attemptJobID, 3, attemptNow, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	recoveredAt := attemptNow.Add(2 * time.Minute)
+	recoveredJobs, err := repo.ClaimDueJobs(ctx, 100, recoveredAt, time.Minute, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recoveredJobID := findClaimedJobID(recoveredJobs, attemptLimitMonitor.ID); recoveredJobID != "" {
+		t.Fatalf("recovered final attempt as job %s, want no attempt 4", recoveredJobID)
+	}
+	terminalJob, err := repo.GetCheckJob(ctx, attemptJobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminalJob.Status != checkJobStatusDead || terminalJob.Attempt != 3 || terminalJob.CompletedAt.IsZero() {
+		t.Fatalf("terminal job = %+v, want dead attempt 3", terminalJob)
+	}
+	var activeJobs int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM check_jobs
+		WHERE monitor_id = $1
+			AND status IN ('scheduled', 'queued', 'processing', 'failed')
+	`, attemptLimitMonitor.ID).Scan(&activeJobs); err != nil {
+		t.Fatal(err)
+	}
+	if activeJobs != 0 {
+		t.Fatalf("active jobs after terminal recovery = %d, want 0", activeJobs)
+	}
+	updatedAttemptMonitor, err := repo.Get(ctx, attemptLimitMonitor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNextCheckAt := recoveredAt.Add(time.Minute)
+	if !updatedAttemptMonitor.NextCheckAt.Equal(wantNextCheckAt.Truncate(time.Microsecond)) {
+		t.Fatalf("next_check_at = %s, want %s", updatedAttemptMonitor.NextCheckAt, wantNextCheckAt)
+	}
+	nextPeriodicJobs, err := repo.ClaimDueJobs(ctx, 100, wantNextCheckAt, time.Minute, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextPeriodicJobID := findClaimedJobID(nextPeriodicJobs, attemptLimitMonitor.ID)
+	if nextPeriodicJobID == "" || nextPeriodicJobID == attemptJobID {
+		t.Fatalf("next periodic jobs = %+v, want a new job", nextPeriodicJobs)
+	}
+	nextPeriodicJob, err := repo.GetCheckJob(ctx, nextPeriodicJobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nextPeriodicJob.Attempt != 0 {
+		t.Fatalf("next periodic attempt = %d, want 0", nextPeriodicJob.Attempt)
 	}
 }
 

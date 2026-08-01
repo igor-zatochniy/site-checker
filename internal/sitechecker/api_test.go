@@ -268,7 +268,7 @@ func (r failingMonitorRepository) CreateManualJob(context.Context, string, time.
 	return CheckJobRecord{}, false, r.err
 }
 
-func (r failingMonitorRepository) ClaimDueJobs(context.Context, int, time.Time, time.Duration) ([]CheckJobRecord, error) {
+func (r failingMonitorRepository) ClaimDueJobs(context.Context, int, time.Time, time.Duration, int) ([]CheckJobRecord, error) {
 	return nil, r.err
 }
 

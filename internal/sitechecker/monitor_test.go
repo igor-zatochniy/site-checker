@@ -305,6 +305,60 @@ func TestMonitorStoreRejectsStaleWorkerLease(t *testing.T) {
 	}
 }
 
+func TestMonitorStoreTerminatesExpiredFinalAttempt(t *testing.T) {
+	cfg := testCheckerConfig(t)
+	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}
+	store := NewMonitorStore(NewNetworkPolicy(cfg))
+
+	monitor, err := store.Create(MonitorInput{
+		URL:             "https://attempt-limit.example.com",
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	jobs := store.ClaimDueJobsWithMaxAttempts(1, now, time.Minute, 3)
+	if len(jobs) != 1 {
+		t.Fatalf("claimed jobs = %+v, want one", jobs)
+	}
+	jobID := jobs[0].ID
+	if err := store.MarkJobPublished(monitor.ID, jobID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkJobProcessing(monitor.ID, jobID, 3, now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	recoveredAt := now.Add(2 * time.Minute)
+	if recovered := store.ClaimDueJobsWithMaxAttempts(1, recoveredAt, time.Minute, 3); len(recovered) != 0 {
+		t.Fatalf("recovered jobs = %+v, want no attempt 4", recovered)
+	}
+	dead, err := store.CheckJob(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dead.Status != checkJobStatusDead || dead.Attempt != 3 || dead.CompletedAt.IsZero() {
+		t.Fatalf("terminal job = %+v, want dead attempt 3", dead)
+	}
+
+	updated, err := store.Get(monitor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNextCheckAt := recoveredAt.Add(time.Minute)
+	if !updated.NextCheckAt.Equal(wantNextCheckAt) {
+		t.Fatalf("next_check_at = %s, want %s", updated.NextCheckAt, wantNextCheckAt)
+	}
+	next := store.ClaimDueJobsWithMaxAttempts(1, wantNextCheckAt, time.Minute, 3)
+	if len(next) != 1 || next[0].ID == jobID || next[0].Attempt != 0 {
+		t.Fatalf("next periodic jobs = %+v, want a new attempt 0 job", next)
+	}
+}
+
 func TestMonitorStoreManualCheckUsesPipelineAndPreservesPeriodicSchedule(t *testing.T) {
 	cfg := testCheckerConfig(t)
 	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}

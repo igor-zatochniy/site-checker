@@ -297,13 +297,16 @@ func (r *PostgresMonitorRepository) CreateManualJob(ctx context.Context, id stri
 	return job, true, nil
 }
 
-func (r *PostgresMonitorRepository) ClaimDueJobs(ctx context.Context, limit int, now time.Time, leaseTimeout time.Duration) ([]CheckJobRecord, error) {
+func (r *PostgresMonitorRepository) ClaimDueJobs(ctx context.Context, limit int, now time.Time, leaseTimeout time.Duration, maxAttempts int) ([]CheckJobRecord, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
 	now = now.UTC()
 	if leaseTimeout <= 0 {
 		leaseTimeout = time.Minute
+	}
+	if maxAttempts <= 0 {
+		maxAttempts = defaultMaxJobAttempts
 	}
 	leaseExpiresAt := now.Add(leaseTimeout)
 
@@ -312,6 +315,39 @@ func (r *PostgresMonitorRepository) ClaimDueJobs(ctx context.Context, limit int,
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `
+		WITH exhausted AS (
+			UPDATE check_jobs
+			SET status = 'dead',
+				processing_started_at = NULL,
+				lease_expires_at = NULL,
+				lease_token = NULL,
+				completed_at = $1::timestamptz,
+				last_error = CASE status
+					WHEN 'processing' THEN 'processing lease expired; maximum attempts reached'
+					WHEN 'queued' THEN 'queued delivery lease expired; maximum attempts reached'
+					ELSE 'maximum processing attempts reached'
+				END,
+				updated_at = $1::timestamptz
+			WHERE attempt >= $2
+				AND (
+					(status = 'processing' AND lease_expires_at <= $1::timestamptz)
+					OR (status = 'queued' AND published_at <= $3::timestamptz)
+					OR (status = 'failed' AND available_at <= $1::timestamptz)
+					OR (status = 'scheduled' AND lease_expires_at <= $1::timestamptz)
+				)
+			RETURNING monitor_id, kind
+		)
+		UPDATE monitors AS monitor
+		SET next_check_at = $1::timestamptz + (monitor.interval_seconds * interval '1 second'),
+			updated_at = $1::timestamptz
+		FROM exhausted
+		WHERE monitor.id = exhausted.monitor_id
+			AND exhausted.kind = 'scheduled'
+	`, now, maxAttempts, now.Add(-leaseTimeout)); err != nil {
+		return nil, err
+	}
 
 	if _, err := tx.Exec(ctx, `
 		UPDATE check_jobs
@@ -324,7 +360,8 @@ func (r *PostgresMonitorRepository) ClaimDueJobs(ctx context.Context, limit int,
 			updated_at = $1::timestamptz
 		WHERE status = 'processing'
 			AND lease_expires_at <= $1::timestamptz
-	`, now); err != nil {
+			AND attempt < $2
+	`, now, maxAttempts); err != nil {
 		return nil, err
 	}
 
@@ -337,7 +374,8 @@ func (r *PostgresMonitorRepository) ClaimDueJobs(ctx context.Context, limit int,
 			updated_at = $1::timestamptz
 		WHERE status = 'queued'
 			AND published_at <= $2::timestamptz
-	`, now, now.Add(-leaseTimeout)); err != nil {
+			AND attempt < $3
+	`, now, now.Add(-leaseTimeout), maxAttempts); err != nil {
 		return nil, err
 	}
 
@@ -348,6 +386,7 @@ func (r *PostgresMonitorRepository) ClaimDueJobs(ctx context.Context, limit int,
 			WHERE status IN ('scheduled', 'failed')
 				AND available_at <= $2::timestamptz
 				AND (lease_expires_at IS NULL OR lease_expires_at <= $2::timestamptz)
+				AND attempt < $4
 			ORDER BY available_at, scheduled_for, id
 			FOR UPDATE SKIP LOCKED
 			LIMIT $1
@@ -361,7 +400,7 @@ func (r *PostgresMonitorRepository) ClaimDueJobs(ctx context.Context, limit int,
 		RETURNING j.id, j.monitor_id, j.kind, j.scheduled_for, j.status, j.attempt,
 			j.available_at, j.published_at, j.processing_started_at,
 			j.lease_expires_at, j.lease_token, j.completed_at, j.last_error, j.created_at, j.updated_at
-	`, limit, now, leaseExpiresAt)
+	`, limit, now, leaseExpiresAt, maxAttempts)
 	if err != nil {
 		return nil, err
 	}

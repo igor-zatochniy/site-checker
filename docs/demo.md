@@ -2,14 +2,14 @@
 
 This walkthrough shows the main API and observability endpoints. It assumes the service is running on `http://localhost:8080`.
 
-If `API_KEY` is configured, include it in REST API requests:
+API-enabled roles require authentication. Configure a key with at least 24 characters and include it in REST API requests:
 
 ```bash
 export BASE_URL=http://localhost:8080
-export API_KEY=change-me
+export API_KEY=local-site-checker-api-key
 ```
 
-If `API_KEY` is empty, omit the `X-API-Key` header.
+For an explicitly unauthenticated local demo, set `APP_ENV=local` and `AUTH_DISABLED=true`, then omit the `X-API-Key` header. Authentication cannot be disabled in production.
 
 ## Create a monitor
 

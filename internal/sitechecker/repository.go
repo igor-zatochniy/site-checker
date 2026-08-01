@@ -15,7 +15,7 @@ type MonitorRepository interface {
 	Update(ctx context.Context, id string, patch MonitorPatch) (Monitor, error)
 	Delete(ctx context.Context, id string) error
 	CreateManualJob(ctx context.Context, id string, now time.Time) (CheckJobRecord, bool, error)
-	ClaimDueJobs(ctx context.Context, limit int, now time.Time, leaseTimeout time.Duration) ([]CheckJobRecord, error)
+	ClaimDueJobs(ctx context.Context, limit int, now time.Time, leaseTimeout time.Duration, maxAttempts int) ([]CheckJobRecord, error)
 	MarkJobPublished(ctx context.Context, id, jobID string, now time.Time) error
 	ReleaseJobPublish(ctx context.Context, id, jobID, lastError string, now time.Time) error
 	MarkJobProcessing(ctx context.Context, id, jobID string, attempt int, now time.Time, leaseTimeout time.Duration) (ProcessingLease, error)
@@ -72,8 +72,8 @@ func (r *InMemoryMonitorRepository) CreateManualJob(_ context.Context, id string
 	return r.store.CreateManualJob(id, now)
 }
 
-func (r *InMemoryMonitorRepository) ClaimDueJobs(_ context.Context, limit int, now time.Time, leaseTimeout time.Duration) ([]CheckJobRecord, error) {
-	return r.store.ClaimDueJobs(limit, now, leaseTimeout), nil
+func (r *InMemoryMonitorRepository) ClaimDueJobs(_ context.Context, limit int, now time.Time, leaseTimeout time.Duration, maxAttempts int) ([]CheckJobRecord, error) {
+	return r.store.ClaimDueJobsWithMaxAttempts(limit, now, leaseTimeout, maxAttempts), nil
 }
 
 func (r *InMemoryMonitorRepository) MarkJobPublished(_ context.Context, id, jobID string, now time.Time) error {

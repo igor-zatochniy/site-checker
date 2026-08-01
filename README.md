@@ -93,7 +93,7 @@ GET    /api/v1/incidents
 
 `POST /api/v1/monitors/{id}/check` persists an asynchronous manual job and returns `202 Accepted`. The scheduler and workers process it through the same PostgreSQL and RabbitMQ lifecycle as periodic checks; the API role does not require external HTTP egress.
 
-If `API_KEY` is set, REST requests must include either:
+API-enabled roles fail at startup unless authentication is configured. Set an `API_KEY` with at least 24 characters and send either:
 
 ```text
 X-API-Key: <key>
@@ -105,7 +105,7 @@ Create monitor:
 ```bash
 curl -sS -X POST http://localhost:8080/api/v1/monitors \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: change-me" \
+  -H "X-API-Key: local-site-checker-api-key" \
   -d '{"url":"https://example.com","interval_seconds":60,"timeout_seconds":5,"expected_status":200}'
 ```
 
@@ -117,7 +117,7 @@ Fast local mode:
 
 ```bash
 go test ./...
-go run .
+APP_ENV=local AUTH_DISABLED=true go run .
 ```
 
 The service starts with no seeded monitors by default. Add monitors through the REST API, provide `SEED_URLS_FILE`, or explicitly enable demo links with `SEED_DEFAULT_LINKS=true` / `APP_ENV=demo`.
@@ -129,7 +129,7 @@ STORAGE_TYPE=postgres \
 DATABASE_URL='postgres://site_checker:site_checker@localhost:5432/site_checker?sslmode=disable' \
 QUEUE_TYPE=rabbitmq \
 RABBITMQ_URL='amqp://site_checker:site_checker@localhost:5672/' \
-API_KEY='change-me' \
+API_KEY='replace-with-a-random-api-key' \
 go run .
 ```
 
@@ -193,7 +193,7 @@ go test -bench=. -benchmem
 pprof is disabled by default. Enable it only in trusted development or internal networks:
 
 ```bash
-ENABLE_PPROF=true go run .
+APP_ENV=local AUTH_DISABLED=true ENABLE_PPROF=true go run .
 ```
 
 Then open:
@@ -286,7 +286,7 @@ Expected demonstration:
 - The service keeps one binary and selects behavior through `APP_ROLE`. This keeps deployment artifacts simple while still allowing API, Scheduler, Worker, and Alert Dispatcher roles to scale independently.
 - `package main` is intentionally thin. Application code lives in `internal/sitechecker`, which gives the binary a clear boundary while keeping related internals close enough to refactor safely.
 - The repository and queue interfaces support both local in-memory mode and production PostgreSQL/RabbitMQ mode. In-memory mode is fast for development, but PostgreSQL and RabbitMQ are the durable path for multi-replica deployments.
-- PostgreSQL `check_jobs` is the authoritative job lifecycle: `scheduled → queued → processing → completed`, with explicit `failed` retry and terminal `dead` states. Periodic and manual jobs share this pipeline. RabbitMQ transports job IDs, while database attempts and unique processing lease tokens fence stale workers from completing a newer attempt.
+- PostgreSQL `check_jobs` is the authoritative job lifecycle: `scheduled → queued → processing → completed`, with explicit `failed` retry and terminal `dead` states. Periodic and manual jobs share this pipeline. RabbitMQ transports job IDs, while database attempts and unique processing lease tokens fence stale workers from completing a newer attempt. Lease recovery atomically marks a final exhausted attempt `dead`, so the scheduler cannot publish an attempt above `MAX_JOB_ATTEMPTS`.
 - SSRF protection is implemented in application code and reinforced by Kubernetes NetworkPolicy. Application-level checks give portable behavior; network policy adds defense in depth in clusters.
 - A check result, incident transition, cooldown decision, and alert outbox insert share one PostgreSQL transaction. Webhook delivery is intentionally at-least-once; a stable `Idempotency-Key` lets receivers deduplicate the rare retry after an ambiguous network outcome.
 - Built-in demo URLs are opt-in. Normal deployments start with an empty monitor set to avoid sending unintended traffic to third-party websites.
@@ -312,7 +312,8 @@ Expected demonstration:
 | `STORAGE_TYPE` | `memory` or `postgres` when `DATABASE_URL` is set | Storage backend. |
 | `DATABASE_URL` | empty | PostgreSQL connection string. Required for `STORAGE_TYPE=postgres`. |
 | `RUN_MIGRATIONS` | `true` | Runs embedded SQL migrations on startup. |
-| `API_KEY` | empty | Enables REST API key authentication when set. |
+| `API_KEY` | empty | API key with at least 24 characters. Required for `api` and `all` roles unless local authentication is explicitly disabled. |
+| `AUTH_DISABLED` | `false` | Explicitly disables API authentication. Allowed only with `APP_ENV=local`, `development`, or `demo`; rejected in production. |
 | `QUEUE_TYPE` | `memory` or `rabbitmq` when `RABBITMQ_URL` is set | Job queue backend. |
 | `RABBITMQ_URL` | empty | RabbitMQ AMQP URL. Required for `QUEUE_TYPE=rabbitmq`. |
 | `RABBITMQ_CONNECT_TIMEOUT` | `5s` | Timeout for one RabbitMQ TCP and protocol connection attempt. |
@@ -322,7 +323,7 @@ Expected demonstration:
 | `DEAD_LETTER_QUEUE_NAME` | `site_checker.checks.dead` | RabbitMQ dead-letter queue. |
 | `QUEUE_BUFFER_SIZE` | `1000` | In-memory queue buffer size. |
 | `QUEUE_PREFETCH` | `10` | RabbitMQ consumer prefetch. |
-| `MAX_JOB_ATTEMPTS` | `3` | Processing attempts before a persistently failing job reaches the dead-letter queue. |
+| `MAX_JOB_ATTEMPTS` | `3` | Strict maximum processing attempts. PostgreSQL lease recovery terminalizes an expired final attempt without publishing another delivery. |
 | `WORKER_COUNT` | `10` | Number of worker goroutines in each worker process. |
 | `SCHEDULER_BATCH_SIZE` | `100` | Number of due monitors claimed per scheduler tick. |
 | `CHECK_LEASE_TIMEOUT` | `2m` | Bounds publication, queued-delivery, and processing recovery leases. It must be at least 90 seconds: the maximum 60-second monitor timeout plus a 30-second persistence margin. |
@@ -365,13 +366,13 @@ https://openai.com
 Run with an external URL file:
 
 ```bash
-SEED_URLS_FILE=urls.example.txt go run .
+APP_ENV=local AUTH_DISABLED=true SEED_URLS_FILE=urls.example.txt go run .
 ```
 
 Run with built-in demo links:
 
 ```bash
-APP_ENV=demo go run .
+APP_ENV=demo AUTH_DISABLED=true go run .
 ```
 
 ## Security Defaults

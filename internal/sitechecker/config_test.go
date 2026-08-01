@@ -13,6 +13,7 @@ var configEnvKeys = []string{
 	"DATABASE_URL",
 	"RUN_MIGRATIONS",
 	"API_KEY",
+	"AUTH_DISABLED",
 	"QUEUE_TYPE",
 	"RABBITMQ_URL",
 	"RABBITMQ_CONNECT_TIMEOUT",
@@ -70,6 +71,7 @@ func cleanConfigEnv(t *testing.T) {
 			}
 		})
 	}
+	t.Setenv("API_KEY", "test-api-key-with-24-characters")
 }
 
 func TestLoadConfigDefaults(t *testing.T) {
@@ -118,6 +120,61 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if _, ok := cfg.AllowedPorts[443]; !ok {
 		t.Fatalf("port 443 is not allowed by default")
+	}
+}
+
+func TestLoadConfigRequiresAuthenticationForAPIEnabledRoles(t *testing.T) {
+	for _, role := range []string{"all", "api"} {
+		t.Run(role, func(t *testing.T) {
+			cleanConfigEnv(t)
+			t.Setenv("APP_ROLE", role)
+			t.Setenv("API_KEY", "")
+
+			if _, err := LoadConfig(); err == nil {
+				t.Fatalf("LoadConfig returned nil error for unauthenticated production role %q", role)
+			}
+		})
+	}
+}
+
+func TestLoadConfigAllowsExplicitlyDisabledAuthenticationOnlyOutsideProduction(t *testing.T) {
+	cleanConfigEnv(t)
+	t.Setenv("APP_ENV", "local")
+	t.Setenv("APP_ROLE", "api")
+	t.Setenv("API_KEY", "")
+	t.Setenv("AUTH_DISABLED", "true")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if !cfg.AuthDisabled {
+		t.Fatal("AuthDisabled = false, want true")
+	}
+
+	t.Setenv("APP_ENV", "production")
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig returned nil error for AUTH_DISABLED=true in production")
+	}
+}
+
+func TestLoadConfigRejectsWeakAPIKey(t *testing.T) {
+	cleanConfigEnv(t)
+	t.Setenv("APP_ROLE", "api")
+	t.Setenv("API_KEY", "too-short")
+
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig returned nil error for a weak API key")
+	}
+}
+
+func TestLoadConfigDoesNotRequireAPIKeyForWorkerRole(t *testing.T) {
+	cleanConfigEnv(t)
+	t.Setenv("APP_ROLE", "worker")
+	t.Setenv("API_KEY", "")
+
+	if _, err := LoadConfig(); err != nil {
+		t.Fatalf("LoadConfig returned error for worker role: %v", err)
 	}
 }
 

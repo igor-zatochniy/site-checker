@@ -44,6 +44,7 @@ const (
 	defaultRabbitMQReconnectInitial = time.Second
 	defaultRabbitMQReconnectMax     = 30 * time.Second
 	processingLeaseSafetyMargin     = 30 * time.Second
+	minAPIKeyLength                 = 24
 )
 
 type Config struct {
@@ -53,6 +54,7 @@ type Config struct {
 	DatabaseURL              string
 	RunMigrations            bool
 	APIKey                   string
+	AuthDisabled             bool
 	QueueType                string
 	RabbitMQURL              string
 	RabbitMQConnectTimeout   time.Duration
@@ -112,6 +114,7 @@ func LoadConfig() (Config, error) {
 	cfg.StorageType = validateEnum("STORAGE_TYPE", cfg.StorageType, []string{"memory", "postgres"}, &errs)
 	cfg.RunMigrations = envBool("RUN_MIGRATIONS", true, &errs)
 	cfg.APIKey = envString("API_KEY", "")
+	cfg.AuthDisabled = envBool("AUTH_DISABLED", false, &errs)
 	cfg.RabbitMQURL = envString("RABBITMQ_URL", "")
 	cfg.RabbitMQConnectTimeout = envDuration("RABBITMQ_CONNECT_TIMEOUT", defaultRabbitMQConnectTimeout, time.Second, time.Minute, &errs)
 	cfg.RabbitMQReconnectInitial = envDuration("RABBITMQ_RECONNECT_INITIAL_BACKOFF", defaultRabbitMQReconnectInitial, 100*time.Millisecond, time.Hour, &errs)
@@ -189,6 +192,24 @@ func LoadConfig() (Config, error) {
 
 	if cfg.UserAgent == "" {
 		errs = append(errs, errors.New("USER_AGENT must not be empty"))
+	}
+	apiEnabled := cfg.AppRole == "all" || cfg.AppRole == "api"
+	if cfg.AuthDisabled {
+		switch cfg.AppEnv {
+		case "local", "development", "demo":
+		default:
+			errs = append(errs, errors.New("AUTH_DISABLED=true is allowed only when APP_ENV is local, development, or demo"))
+		}
+		if cfg.APIKey != "" {
+			errs = append(errs, errors.New("AUTH_DISABLED=true must not be combined with API_KEY"))
+		}
+	}
+	if apiEnabled && !cfg.AuthDisabled {
+		if cfg.APIKey == "" {
+			errs = append(errs, errors.New("API_KEY is required for API-enabled roles; use AUTH_DISABLED=true only in local, development, or demo environments"))
+		} else if len(cfg.APIKey) < minAPIKeyLength {
+			errs = append(errs, fmt.Errorf("API_KEY must contain at least %d characters", minAPIKeyLength))
+		}
 	}
 	if cfg.StorageType == "postgres" && cfg.DatabaseURL == "" {
 		errs = append(errs, errors.New("DATABASE_URL is required when STORAGE_TYPE=postgres"))
