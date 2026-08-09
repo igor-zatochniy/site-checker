@@ -92,3 +92,18 @@ func TestCheckHTTPClientUsesPerMonitorContextTimeout(t *testing.T) {
 		t.Fatalf("check client timeout = %s, want zero so monitor context owns the timeout", client.Timeout)
 	}
 }
+
+func TestNetworkPolicyRejectsProxyOutsidePrivateNetworkTrust(t *testing.T) {
+	policy := NewNetworkPolicy(Config{
+		AllowProxyEnv: true,
+		AllowedPorts:  map[int]struct{}{80: {}, 443: {}},
+	})
+	req, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := policy.Proxy(req); err == nil {
+		t.Fatal("Proxy returned nil error outside private-network trust mode")
+	}
+}

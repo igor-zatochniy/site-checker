@@ -231,6 +231,29 @@ func TestLoadConfigRejectsCheckLeaseBelowMaximumMonitorTimeoutMargin(t *testing.
 	}
 }
 
+func TestLoadConfigRejectsProxyWithoutPrivateNetworkTrust(t *testing.T) {
+	cleanConfigEnv(t)
+	t.Setenv("ALLOW_PROXY_ENV", "true")
+
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig returned nil error for proxy use outside private-network trust mode")
+	}
+}
+
+func TestLoadConfigAllowsProxyWithPrivateNetworkTrust(t *testing.T) {
+	cleanConfigEnv(t)
+	t.Setenv("ALLOW_PROXY_ENV", "true")
+	t.Setenv("ALLOW_PRIVATE_NETWORKS", "true")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if !cfg.AllowProxyEnv || !cfg.AllowPrivateNetworks {
+		t.Fatalf("proxy trust config = proxy:%t private:%t, want both true", cfg.AllowProxyEnv, cfg.AllowPrivateNetworks)
+	}
+}
+
 func TestLoadConfigAcceptsOverrides(t *testing.T) {
 	cleanConfigEnv(t)
 	t.Setenv("WORKER_COUNT", "4")

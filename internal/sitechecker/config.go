@@ -149,6 +149,9 @@ func LoadConfig() (Config, error) {
 	cfg.MaxHeaderBytes = int64(envInt("MAX_HEADER_BYTES", defaultMaxHeaderBytes, 1024, 1024*1024, &errs))
 	cfg.AllowPrivateNetworks = envBool("ALLOW_PRIVATE_NETWORKS", false, &errs)
 	cfg.AllowProxyEnv = envBool("ALLOW_PROXY_ENV", false, &errs)
+	if cfg.AllowProxyEnv && !cfg.AllowPrivateNetworks {
+		errs = append(errs, errors.New("ALLOW_PROXY_ENV=true requires ALLOW_PRIVATE_NETWORKS=true because proxy-side DNS resolution is outside the local SSRF boundary"))
+	}
 	cfg.AllowedPorts = envPorts("ALLOWED_PORTS", defaultAllowedPorts, &errs)
 	cfg.URLsFile = envString("URLS_FILE", "")
 	cfg.SeedURLsFile = envString("SEED_URLS_FILE", cfg.URLsFile)

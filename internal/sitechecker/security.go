@@ -127,6 +127,9 @@ func (p *NetworkPolicy) Proxy(req *http.Request) (*url.URL, error) {
 	if !p.allowProxyEnv {
 		return nil, nil
 	}
+	if !p.allowPrivateNetworks {
+		return nil, fmt.Errorf("proxy environment requires private-network trust mode")
+	}
 
 	proxyURL, err := http.ProxyFromEnvironment(req)
 	if err != nil || proxyURL == nil {

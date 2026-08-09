@@ -339,7 +339,7 @@ Expected demonstration:
 | `MAX_HEADER_BYTES` | `65536` | Maximum response header bytes. |
 | `ALLOWED_PORTS` | `80,443` | Allowed outbound destination ports. |
 | `ALLOW_PRIVATE_NETWORKS` | `false` | Allows private, loopback, and link-local networks when explicitly enabled. |
-| `ALLOW_PROXY_ENV` | `false` | Allows proxy settings from the environment when explicitly enabled. |
+| `ALLOW_PROXY_ENV` | `false` | Uses proxy settings from the environment only in the explicit `ALLOW_PRIVATE_NETWORKS=true` trust mode; proxy-side DNS resolution is outside the local SSRF boundary. |
 | `ALERT_WEBHOOK_URL` | empty | Optional webhook URL for persisted failure alerts. Requires PostgreSQL. |
 | `ALERT_FAILURE_THRESHOLD` | `3` | Consecutive incident failures before creating an outbox event. |
 | `ALERT_COOLDOWN` | `10m` | Database-enforced minimum time between alert events for one incident. |
