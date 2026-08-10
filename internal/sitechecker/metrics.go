@@ -23,6 +23,7 @@ type Metrics struct {
 	checkErrorsTotal     uint64
 	jobsScheduledTotal   uint64
 	jobsSkippedTotal     uint64
+	infraRequeuesTotal   uint64
 	alertsDeliveredTotal uint64
 	alertFailuresTotal   uint64
 	alertsDeadTotal      uint64
@@ -51,6 +52,7 @@ type MetricsSnapshot struct {
 	CheckErrorsTotal     uint64
 	JobsScheduledTotal   uint64
 	JobsSkippedTotal     uint64
+	InfraRequeuesTotal   uint64
 	AlertsDeliveredTotal uint64
 	AlertFailuresTotal   uint64
 	AlertsDeadTotal      uint64
@@ -96,6 +98,12 @@ func (m *Metrics) RecordSkipped() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.jobsSkippedTotal++
+}
+
+func (m *Metrics) RecordInfrastructureRequeue() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.infraRequeuesTotal++
 }
 
 func (m *Metrics) RecordAlertDelivered() {
@@ -188,6 +196,7 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		CheckErrorsTotal:     m.checkErrorsTotal,
 		JobsScheduledTotal:   m.jobsScheduledTotal,
 		JobsSkippedTotal:     m.jobsSkippedTotal,
+		InfraRequeuesTotal:   m.infraRequeuesTotal,
 		AlertsDeliveredTotal: m.alertsDeliveredTotal,
 		AlertFailuresTotal:   m.alertFailuresTotal,
 		AlertsDeadTotal:      m.alertsDeadTotal,
@@ -240,6 +249,7 @@ func (m *Metrics) Prometheus() string {
 	writeMetric("site_checker_check_errors_total", "Total checks that returned an error.", "counter", snapshot.CheckErrorsTotal)
 	writeMetric("site_checker_jobs_scheduled_total", "Total jobs accepted by the scheduler.", "counter", snapshot.JobsScheduledTotal)
 	writeMetric("site_checker_jobs_skipped_total", "Total scheduler attempts skipped because the queue was full.", "counter", snapshot.JobsSkippedTotal)
+	writeMetric("site_checker_job_infrastructure_requeues_total", "Total jobs requeued after transient infrastructure failures.", "counter", snapshot.InfraRequeuesTotal)
 	writeMetric("site_checker_alerts_delivered_total", "Total webhook alerts delivered successfully.", "counter", snapshot.AlertsDeliveredTotal)
 	writeMetric("site_checker_alert_delivery_failures_total", "Total failed webhook alert delivery attempts.", "counter", snapshot.AlertFailuresTotal)
 	writeMetric("site_checker_alerts_dead_total", "Total webhook alerts exhausted after retry attempts.", "counter", snapshot.AlertsDeadTotal)

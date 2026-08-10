@@ -390,12 +390,8 @@ func TestHandleQueueDeliveryRequeuesInfrastructureFailureWithoutConsumingAttempt
 		},
 	}
 
-	err := handleQueueDelivery(ctx, 1, service, delivery, time.Minute, logger)
-	if !errors.Is(err, repositoryError) {
-		t.Fatalf("error = %v, want repository error", err)
-	}
-	if !strings.Contains(err.Error(), "monitor lookup failed") {
-		t.Fatalf("error = %q, want monitor lookup context", err)
+	if err := handleQueueDelivery(ctx, 1, service, delivery, time.Minute, logger); err != nil {
+		t.Fatalf("handleQueueDelivery returned error after successful requeue: %v", err)
 	}
 	if ackCalls != 0 || nackCalls != 0 || requeueCalls != 1 {
 		t.Fatalf("ack=%d nack=%d requeue=%d, want only one infrastructure requeue", ackCalls, nackCalls, requeueCalls)
@@ -403,6 +399,102 @@ func TestHandleQueueDeliveryRequeuesInfrastructureFailureWithoutConsumingAttempt
 	if delivery.Job.Attempt != 2 {
 		t.Fatalf("attempt = %d, want unchanged attempt 2", delivery.Job.Attempt)
 	}
+	if got := metrics.Snapshot().InfraRequeuesTotal; got != 1 {
+		t.Fatalf("infrastructure requeues = %d, want 1", got)
+	}
+	if output := metrics.Prometheus(); !strings.Contains(output, "site_checker_job_infrastructure_requeues_total 1") {
+		t.Fatalf("Prometheus output does not contain the infrastructure requeue counter: %s", output)
+	}
+}
+
+func TestRunQueueWorkerContinuesAfterSuccessfulInfrastructureRequeue(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	metrics := NewMetrics("test", "commit", "date", 0)
+	repositoryError := errors.New("postgres is temporarily unavailable")
+	baseRepository := NewInMemoryMonitorRepository(NewNetworkPolicy(Config{
+		AllowedPorts: map[int]struct{}{80: {}, 443: {}},
+	}))
+	repository := &failOnceGetRepository{
+		MonitorRepository: baseRepository,
+		err:               repositoryError,
+	}
+	service := NewMonitorService(repository, nil, metrics, AlertPolicy{}, logger)
+
+	var requeueCalls, ackCalls int
+	deliveries := make(chan QueueDelivery, 2)
+	deliveries <- QueueDelivery{
+		Job: CheckJobMessage{JobID: "job_transient", MonitorID: "mon_transient", Attempt: 1},
+		Requeue: func(context.Context) error {
+			requeueCalls++
+			return nil
+		},
+	}
+	deliveries <- QueueDelivery{
+		Job: CheckJobMessage{JobID: "job_next", MonitorID: "mon_missing", Attempt: 1},
+		Ack: func(context.Context) error {
+			ackCalls++
+			return nil
+		},
+	}
+	close(deliveries)
+
+	if err := runQueueWorker(ctx, 1, service, deliveries, time.Minute, logger); err != nil {
+		t.Fatalf("runQueueWorker returned error: %v", err)
+	}
+	if requeueCalls != 1 || ackCalls != 1 {
+		t.Fatalf("requeue=%d ack=%d, want worker to requeue first delivery and process next delivery", requeueCalls, ackCalls)
+	}
+	if got := metrics.Snapshot().InfraRequeuesTotal; got != 1 {
+		t.Fatalf("infrastructure requeues = %d, want 1", got)
+	}
+}
+
+func TestHandleQueueDeliveryFailsWhenInfrastructureRequeueFails(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	metrics := NewMetrics("test", "commit", "date", 0)
+	repositoryError := errors.New("postgres is unavailable")
+	requeueError := errors.New("rabbitmq requeue failed")
+	service := NewMonitorService(
+		failingMonitorRepository{err: repositoryError},
+		nil,
+		metrics,
+		AlertPolicy{},
+		logger,
+	)
+	delivery := QueueDelivery{
+		Job: CheckJobMessage{JobID: "job_requeue_failure", MonitorID: "mon_1", Attempt: 1},
+		Requeue: func(context.Context) error {
+			return requeueError
+		},
+	}
+
+	err := handleQueueDelivery(ctx, 1, service, delivery, time.Minute, logger)
+	if !errors.Is(err, repositoryError) || !errors.Is(err, requeueError) {
+		t.Fatalf("error = %v, want repository and requeue errors", err)
+	}
+	if got := metrics.Snapshot().InfraRequeuesTotal; got != 0 {
+		t.Fatalf("infrastructure requeues = %d, want 0 after failed requeue", got)
+	}
+}
+
+type failOnceGetRepository struct {
+	MonitorRepository
+	mu     sync.Mutex
+	failed bool
+	err    error
+}
+
+func (r *failOnceGetRepository) Get(ctx context.Context, id string) (Monitor, error) {
+	r.mu.Lock()
+	if !r.failed {
+		r.failed = true
+		r.mu.Unlock()
+		return Monitor{}, r.err
+	}
+	r.mu.Unlock()
+	return r.MonitorRepository.Get(ctx, id)
 }
 
 type retryOnceRepository struct {

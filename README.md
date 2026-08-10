@@ -338,7 +338,7 @@ Expected demonstration:
 | `MAX_BODY_BYTES` | `65536` | Maximum response body bytes to read. |
 | `MAX_HEADER_BYTES` | `65536` | Maximum response header bytes. |
 | `ALLOWED_PORTS` | `80,443` | Allowed outbound destination ports. |
-| `ALLOW_PRIVATE_NETWORKS` | `false` | Allows private, loopback, and link-local networks when explicitly enabled. |
+| `ALLOW_PRIVATE_NETWORKS` | `false` | Allows private, loopback IP, and link-local addresses when explicitly enabled; `localhost` hostnames remain blocked. |
 | `ALLOW_PROXY_ENV` | `false` | Uses proxy settings from the environment only in the explicit `ALLOW_PRIVATE_NETWORKS=true` trust mode; proxy-side DNS resolution is outside the local SSRF boundary. |
 | `ALERT_WEBHOOK_URL` | empty | Optional webhook URL for persisted failure alerts. Requires PostgreSQL. |
 | `ALERT_FAILURE_THRESHOLD` | `3` | Consecutive incident failures before creating an outbox event. |

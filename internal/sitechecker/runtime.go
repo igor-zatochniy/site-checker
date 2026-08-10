@@ -226,7 +226,7 @@ func handleQueueDelivery(ctx context.Context, workerID int, service *MonitorServ
 			_ = delivery.Ack(ctx)
 			return nil
 		}
-		return requeueInfrastructureFailure(ctx, delivery, err, workerID, "monitor lookup", logger)
+		return requeueInfrastructureFailure(ctx, delivery, err, workerID, "monitor lookup", service.metrics, logger)
 	}
 
 	lease, err := service.MarkProcessing(ctx, delivery.Job.MonitorID, delivery.Job.JobID, delivery.Job.Attempt, time.Now().UTC(), leaseTimeout)
@@ -237,7 +237,7 @@ func handleQueueDelivery(ctx context.Context, workerID int, service *MonitorServ
 			}
 			return nil
 		}
-		return requeueInfrastructureFailure(ctx, delivery, err, workerID, "processing state transition", logger)
+		return requeueInfrastructureFailure(ctx, delivery, err, workerID, "processing state transition", service.metrics, logger)
 	}
 
 	checkCtx, cancel := context.WithTimeout(ctx, time.Duration(monitor.TimeoutSeconds)*time.Second)
@@ -295,6 +295,7 @@ func requeueInfrastructureFailure(
 	cause error,
 	workerID int,
 	operation string,
+	metrics *Metrics,
 	logger *slog.Logger,
 ) error {
 	requeue := delivery.Requeue
@@ -312,7 +313,16 @@ func requeueInfrastructureFailure(
 		)
 		return fmt.Errorf("%s failed and job requeue failed: %w", operation, errors.Join(cause, err))
 	}
-	return fmt.Errorf("%s failed: %w", operation, cause)
+	if metrics != nil {
+		metrics.RecordInfrastructureRequeue()
+	}
+	logger.Warn("Requeued job after infrastructure error",
+		"worker", workerID,
+		"job_id", delivery.Job.JobID,
+		"operation", operation,
+		"error", cause,
+	)
+	return nil
 }
 
 func checkJobRetryDelay(attempt int) time.Duration {
