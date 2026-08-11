@@ -187,6 +187,7 @@ type RabbitMQQueue struct {
 	prefetch         int
 	maxAttempts      int
 	connectTimeout   time.Duration
+	publishTimeout   time.Duration
 	reconnectInitial time.Duration
 	reconnectMax     time.Duration
 	dial             rabbitMQDialFunc
@@ -203,7 +204,15 @@ type RabbitMQQueue struct {
 	done          chan struct{}
 }
 
-type rabbitMQDialFunc func(ctx context.Context, rawURL string, timeout time.Duration) (*amqp.Connection, error)
+type rabbitMQDialFunc func(ctx context.Context, rawURL string, connectTimeout, writeTimeout time.Duration) (*amqp.Connection, error)
+
+type rabbitMQDeadlineConn struct {
+	net.Conn
+	writeTimeout      time.Duration
+	mu                sync.RWMutex
+	handshakeDeadline time.Time
+	established       bool
+}
 
 type rabbitMQPublishSession struct {
 	channel  *amqp.Channel
@@ -220,6 +229,7 @@ func NewRabbitMQQueue(cfg Config) (*RabbitMQQueue, error) {
 		prefetch:         cfg.QueuePrefetch,
 		maxAttempts:      cfg.MaxJobAttempts,
 		connectTimeout:   durationOrDefault(cfg.RabbitMQConnectTimeout, defaultRabbitMQConnectTimeout),
+		publishTimeout:   durationOrDefault(cfg.RabbitMQPublishTimeout, defaultRabbitMQPublishTimeout),
 		reconnectInitial: durationOrDefault(cfg.RabbitMQReconnectInitial, defaultRabbitMQReconnectInitial),
 		reconnectMax:     durationOrDefault(cfg.RabbitMQReconnectMax, defaultRabbitMQReconnectMax),
 		dial:             dialRabbitMQ,
@@ -234,25 +244,56 @@ func NewRabbitMQQueue(cfg Config) (*RabbitMQQueue, error) {
 	return queue, nil
 }
 
-func dialRabbitMQ(ctx context.Context, rawURL string, timeout time.Duration) (*amqp.Connection, error) {
-	dialer := &net.Dialer{Timeout: timeout}
+func dialRabbitMQ(ctx context.Context, rawURL string, connectTimeout, writeTimeout time.Duration) (*amqp.Connection, error) {
+	dialer := &net.Dialer{Timeout: connectTimeout}
 	return amqp.DialConfig(rawURL, amqp.Config{
 		Dial: func(network, address string) (net.Conn, error) {
 			conn, err := dialer.DialContext(ctx, network, address)
 			if err != nil {
 				return nil, err
 			}
-			deadline := time.Now().Add(timeout)
+			deadlineConn := &rabbitMQDeadlineConn{Conn: conn, writeTimeout: writeTimeout}
+			deadline := time.Now().Add(connectTimeout)
 			if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
 				deadline = ctxDeadline
 			}
-			if err := conn.SetDeadline(deadline); err != nil {
+			if err := deadlineConn.SetDeadline(deadline); err != nil {
 				_ = conn.Close()
 				return nil, err
 			}
-			return conn, nil
+			return deadlineConn, nil
 		},
 	})
+}
+
+func (c *rabbitMQDeadlineConn) SetDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	if deadline.IsZero() {
+		c.established = true
+		c.handshakeDeadline = time.Time{}
+	} else if !c.established {
+		c.handshakeDeadline = deadline
+	}
+	c.mu.Unlock()
+	return c.Conn.SetDeadline(deadline)
+}
+
+func (c *rabbitMQDeadlineConn) Write(payload []byte) (int, error) {
+	c.mu.RLock()
+	established := c.established
+	handshakeDeadline := c.handshakeDeadline
+	c.mu.RUnlock()
+
+	deadline := handshakeDeadline
+	if established {
+		deadline = time.Now().Add(c.writeTimeout)
+	}
+	if !deadline.IsZero() {
+		if err := c.Conn.SetWriteDeadline(deadline); err != nil {
+			return 0, err
+		}
+	}
+	return c.Conn.Write(payload)
 }
 
 func (q *RabbitMQQueue) Ping(ctx context.Context) error {
@@ -315,9 +356,11 @@ func (q *RabbitMQQueue) Publish(ctx context.Context, job CheckJobMessage) error 
 	if err != nil {
 		return err
 	}
+	publishCtx, cancel := context.WithTimeout(ctx, q.publishTimeout)
+	defer cancel()
 
 	for attempt := 1; ; attempt++ {
-		if err := q.ensureConnected(ctx); err != nil {
+		if err := q.ensureConnected(publishCtx); err != nil {
 			return err
 		}
 		q.publishMu.Lock()
@@ -326,7 +369,7 @@ func (q *RabbitMQQueue) Publish(ctx context.Context, job CheckJobMessage) error 
 			q.publishMu.Unlock()
 			continue
 		}
-		err := session.channel.PublishWithContext(ctx, "", q.queueName, true, false, amqp.Publishing{
+		err := session.channel.PublishWithContext(publishCtx, "", q.queueName, true, false, amqp.Publishing{
 			ContentType:  "application/json",
 			DeliveryMode: amqp.Persistent,
 			MessageId:    job.JobID,
@@ -334,7 +377,7 @@ func (q *RabbitMQQueue) Publish(ctx context.Context, job CheckJobMessage) error 
 			Body:         body,
 		})
 		if err == nil {
-			err = q.waitForPublishConfirmation(ctx, session, job.JobID)
+			err = q.waitForPublishConfirmation(publishCtx, session, job.JobID)
 		}
 		q.publishMu.Unlock()
 		if err == nil {
@@ -343,13 +386,13 @@ func (q *RabbitMQQueue) Publish(ctx context.Context, job CheckJobMessage) error 
 		if errors.Is(err, ErrRabbitMQReturned) {
 			return err
 		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
 		q.invalidatePublishChannel(session.channel)
+		if publishCtx.Err() != nil {
+			return publishCtx.Err()
+		}
 		delay := rabbitMQReconnectDelay(attempt, q.reconnectInitial, q.reconnectMax)
 		slog.Warn("RabbitMQ publish failed; reconnecting", "attempt", attempt, "retry_in", delay, "error", err)
-		if err := q.waitForReconnect(ctx, delay); err != nil {
+		if err := q.waitForReconnect(publishCtx, delay); err != nil {
 			return err
 		}
 	}
@@ -562,7 +605,7 @@ func (q *RabbitMQQueue) connectOnce(ctx context.Context) error {
 		return context.Canceled
 	}
 
-	conn, err := q.dial(ctx, q.url, q.connectTimeout)
+	conn, err := q.dial(ctx, q.url, q.connectTimeout, q.publishTimeout)
 	if err != nil {
 		return err
 	}

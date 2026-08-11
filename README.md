@@ -317,6 +317,7 @@ Expected demonstration:
 | `QUEUE_TYPE` | `memory` or `rabbitmq` when `RABBITMQ_URL` is set | Job queue backend. |
 | `RABBITMQ_URL` | empty | RabbitMQ AMQP URL. Required for `QUEUE_TYPE=rabbitmq`. |
 | `RABBITMQ_CONNECT_TIMEOUT` | `5s` | Timeout for one RabbitMQ TCP and protocol connection attempt. |
+| `RABBITMQ_PUBLISH_TIMEOUT` | `10s` | End-to-end limit for publishing and receiving a broker confirmation; socket writes use the same upper bound. |
 | `RABBITMQ_RECONNECT_INITIAL_BACKOFF` | `1s` | Initial delay before retrying a failed RabbitMQ connection or consumer session. |
 | `RABBITMQ_RECONNECT_MAX_BACKOFF` | `30s` | Maximum RabbitMQ reconnect delay. |
 | `QUEUE_NAME` | `site_checker.checks` | Main check job queue. |
@@ -333,14 +334,14 @@ Expected demonstration:
 | `SEED_URLS_FILE` | empty | Explicit path to a newline file or JSON array with seed URLs. Only `all` and `scheduler` roles seed monitors. |
 | `SEED_DEFAULT_LINKS` | `false` | Enables built-in demo seed links. Keep disabled for normal deployments. |
 | `URLS_FILE` | empty | Legacy alias for `SEED_URLS_FILE` when `SEED_URLS_FILE` is unset. |
-| `EXPECTED_STATUS` | `200-399` | Accepted status codes for legacy seeded checks. |
+| `EXPECTED_STATUS` | `200-399` | Status policy for legacy seeded checks. Seeded monitors store the first accepted code because each monitor uses one exact expected status. |
 | `MAX_REDIRECTS` | `3` | Maximum allowed redirects. |
 | `MAX_BODY_BYTES` | `65536` | Maximum response body bytes to read. |
 | `MAX_HEADER_BYTES` | `65536` | Maximum response header bytes. |
 | `ALLOWED_PORTS` | `80,443` | Allowed outbound destination ports. |
 | `ALLOW_PRIVATE_NETWORKS` | `false` | Allows private, loopback IP, and link-local addresses when explicitly enabled; `localhost` hostnames remain blocked. |
 | `ALLOW_PROXY_ENV` | `false` | Uses proxy settings from the environment only in the explicit `ALLOW_PRIVATE_NETWORKS=true` trust mode; proxy-side DNS resolution is outside the local SSRF boundary. |
-| `ALERT_WEBHOOK_URL` | empty | Optional webhook URL for persisted failure alerts. Requires PostgreSQL. |
+| `ALERT_WEBHOOK_URL` | empty | Optional webhook URL for persisted failure alerts. Requires PostgreSQL and is mandatory when `APP_ROLE=alert-dispatcher`. |
 | `ALERT_FAILURE_THRESHOLD` | `3` | Consecutive incident failures before creating an outbox event. |
 | `ALERT_COOLDOWN` | `10m` | Database-enforced minimum time between alert events for one incident. |
 | `ALERT_DISPATCH_INTERVAL` | `1s` | Poll interval when no immediately available outbox batch remains. |

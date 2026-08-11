@@ -41,6 +41,7 @@ const (
 	defaultQueueName                = "site_checker.checks"
 	defaultDeadLetterQueueName      = "site_checker.checks.dead"
 	defaultRabbitMQConnectTimeout   = 5 * time.Second
+	defaultRabbitMQPublishTimeout   = 10 * time.Second
 	defaultRabbitMQReconnectInitial = time.Second
 	defaultRabbitMQReconnectMax     = 30 * time.Second
 	processingLeaseSafetyMargin     = 30 * time.Second
@@ -58,6 +59,7 @@ type Config struct {
 	QueueType                string
 	RabbitMQURL              string
 	RabbitMQConnectTimeout   time.Duration
+	RabbitMQPublishTimeout   time.Duration
 	RabbitMQReconnectInitial time.Duration
 	RabbitMQReconnectMax     time.Duration
 	QueueName                string
@@ -117,6 +119,7 @@ func LoadConfig() (Config, error) {
 	cfg.AuthDisabled = envBool("AUTH_DISABLED", false, &errs)
 	cfg.RabbitMQURL = envString("RABBITMQ_URL", "")
 	cfg.RabbitMQConnectTimeout = envDuration("RABBITMQ_CONNECT_TIMEOUT", defaultRabbitMQConnectTimeout, time.Second, time.Minute, &errs)
+	cfg.RabbitMQPublishTimeout = envDuration("RABBITMQ_PUBLISH_TIMEOUT", defaultRabbitMQPublishTimeout, 100*time.Millisecond, 5*time.Minute, &errs)
 	cfg.RabbitMQReconnectInitial = envDuration("RABBITMQ_RECONNECT_INITIAL_BACKOFF", defaultRabbitMQReconnectInitial, 100*time.Millisecond, time.Hour, &errs)
 	cfg.RabbitMQReconnectMax = envDuration("RABBITMQ_RECONNECT_MAX_BACKOFF", defaultRabbitMQReconnectMax, 100*time.Millisecond, 24*time.Hour, &errs)
 	cfg.QueueType = envString("QUEUE_TYPE", "")
@@ -186,13 +189,15 @@ func LoadConfig() (Config, error) {
 			errs = append(errs, errors.New("STORAGE_TYPE=postgres is required when ALERT_WEBHOOK_URL is configured"))
 		}
 	}
+	if cfg.AppRole == "alert-dispatcher" && cfg.AlertWebhookURL == "" {
+		errs = append(errs, errors.New("ALERT_WEBHOOK_URL is required for APP_ROLE=alert-dispatcher"))
+	}
 	if cfg.AlertRetryMaxBackoff < cfg.AlertRetryInitialBackoff {
 		errs = append(errs, errors.New("ALERT_RETRY_MAX_BACKOFF must be greater than or equal to ALERT_RETRY_INITIAL_BACKOFF"))
 	}
 	if cfg.AlertLeaseTimeout < cfg.AlertDeliveryTimeout {
 		errs = append(errs, errors.New("ALERT_LEASE_TIMEOUT must be greater than or equal to ALERT_DELIVERY_TIMEOUT"))
 	}
-
 	if cfg.UserAgent == "" {
 		errs = append(errs, errors.New("USER_AGENT must not be empty"))
 	}

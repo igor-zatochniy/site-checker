@@ -5,7 +5,7 @@ This directory contains a split backend-platform deployment for Site Checker:
 - API deployment: 2 replicas.
 - Scheduler deployment: 1 replica.
 - Worker deployment: 3 replicas by default.
-- Alert Dispatcher deployment: 1 replica for persisted webhook delivery.
+- Optional Alert Dispatcher deployment: 1 replica for persisted webhook delivery.
 - PostgreSQL demo deployment for monitors, check history, incidents, and the alert outbox.
 - RabbitMQ demo deployment for check jobs and dead-letter handling.
 - Optional KEDA scaling by RabbitMQ queue length.
@@ -61,7 +61,13 @@ The included PostgreSQL and RabbitMQ manifests are suitable for local demonstrat
 
 The included `secret.example.yaml` uses local-demo placeholder values only. Production deployments should use External Secrets Operator, SOPS, Sealed Secrets, or a managed secret store.
 
-Set `ALERT_WEBHOOK_URL` in the managed secret to enable transactional webhook alerts. When it is empty, workers do not create alert events and the dispatcher remains idle.
+The base does not start the optional Alert Dispatcher. Set a non-empty `ALERT_WEBHOOK_URL` in the managed Secret before enabling it; the process intentionally fails startup when this required setting is missing. Then apply the optional deployment:
+
+```bash
+kubectl apply -k deploy/kubernetes/alerts/
+```
+
+Workers create transactional alert events only when the same webhook setting is configured for them.
 
 Remove:
 

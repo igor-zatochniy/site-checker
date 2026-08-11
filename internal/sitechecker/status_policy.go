@@ -91,3 +91,10 @@ func (p StatusPolicy) Allows(statusCode int) bool {
 func (p StatusPolicy) String() string {
 	return p.raw
 }
+
+func (p StatusPolicy) PreferredStatus() int {
+	if len(p.ranges) == 0 {
+		return 200
+	}
+	return p.ranges[0].Min
+}

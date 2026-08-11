@@ -22,6 +22,19 @@ func TestStatusPolicyAllowsConfiguredRanges(t *testing.T) {
 			t.Fatalf("Allows(%d) = %v, want %v", status, got, want)
 		}
 	}
+	if policy.PreferredStatus() != 200 {
+		t.Fatalf("PreferredStatus() = %d, want 200", policy.PreferredStatus())
+	}
+}
+
+func TestStatusPolicyPreferredStatusUsesFirstConfiguredRange(t *testing.T) {
+	policy, err := ParseStatusPolicy("204,300-399")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.PreferredStatus() != 204 {
+		t.Fatalf("PreferredStatus() = %d, want 204", policy.PreferredStatus())
+	}
 }
 
 func TestStatusPolicyRejectsInvalidInput(t *testing.T) {

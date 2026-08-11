@@ -17,6 +17,7 @@ var configEnvKeys = []string{
 	"QUEUE_TYPE",
 	"RABBITMQ_URL",
 	"RABBITMQ_CONNECT_TIMEOUT",
+	"RABBITMQ_PUBLISH_TIMEOUT",
 	"RABBITMQ_RECONNECT_INITIAL_BACKOFF",
 	"RABBITMQ_RECONNECT_MAX_BACKOFF",
 	"QUEUE_NAME",
@@ -105,6 +106,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if cfg.RabbitMQReconnectInitial != time.Second || cfg.RabbitMQReconnectMax != 30*time.Second {
 		t.Fatalf("RabbitMQ reconnect backoff = %s..%s, want 1s..30s", cfg.RabbitMQReconnectInitial, cfg.RabbitMQReconnectMax)
+	}
+	if cfg.RabbitMQPublishTimeout != 10*time.Second {
+		t.Fatalf("RabbitMQ publish timeout = %s, want 10s", cfg.RabbitMQPublishTimeout)
 	}
 	if cfg.CheckInterval != 5*time.Minute {
 		t.Fatalf("CheckInterval = %s, want 5m", cfg.CheckInterval)
@@ -197,6 +201,18 @@ func TestLoadConfigAcceptsAlertDispatcherRole(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsAlertDispatcherWithoutWebhook(t *testing.T) {
+	cleanConfigEnv(t)
+	t.Setenv("APP_ROLE", "alert-dispatcher")
+	t.Setenv("STORAGE_TYPE", "postgres")
+	t.Setenv("DATABASE_URL", "postgres://user:pass@example.com:5432/site_checker")
+	t.Setenv("ALERT_WEBHOOK_URL", "")
+
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig returned nil error for alert dispatcher without webhook URL")
+	}
+}
+
 func TestLoadConfigRequiresPostgresForAlerts(t *testing.T) {
 	cleanConfigEnv(t)
 	t.Setenv("ALERT_WEBHOOK_URL", "https://alerts.example.com/site-checker")
@@ -269,6 +285,7 @@ func TestLoadConfigAcceptsOverrides(t *testing.T) {
 	t.Setenv("RABBITMQ_URL", "amqp://guest:guest@example.com:5672/")
 	t.Setenv("QUEUE_PREFETCH", "7")
 	t.Setenv("RABBITMQ_CONNECT_TIMEOUT", "3s")
+	t.Setenv("RABBITMQ_PUBLISH_TIMEOUT", "7s")
 	t.Setenv("RABBITMQ_RECONNECT_INITIAL_BACKOFF", "500ms")
 	t.Setenv("RABBITMQ_RECONNECT_MAX_BACKOFF", "10s")
 
@@ -302,6 +319,9 @@ func TestLoadConfigAcceptsOverrides(t *testing.T) {
 	}
 	if cfg.RabbitMQConnectTimeout != 3*time.Second || cfg.RabbitMQReconnectMax != 10*time.Second {
 		t.Fatalf("RabbitMQ reconnect config = timeout:%s max:%s", cfg.RabbitMQConnectTimeout, cfg.RabbitMQReconnectMax)
+	}
+	if cfg.RabbitMQPublishTimeout != 7*time.Second {
+		t.Fatalf("RabbitMQ publish timeout = %s, want 7s", cfg.RabbitMQPublishTimeout)
 	}
 	if cfg.CheckLeaseTimeout != 2*time.Minute {
 		t.Fatalf("CheckLeaseTimeout = %s, want 2m", cfg.CheckLeaseTimeout)

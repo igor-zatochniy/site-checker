@@ -119,7 +119,7 @@ func SeedRepository(ctx context.Context, repo MonitorRepository, links []string,
 			URL:             link,
 			IntervalSeconds: int(cfg.CheckInterval.Seconds()),
 			TimeoutSeconds:  int(cfg.HTTPTimeout.Seconds()),
-			ExpectedStatus:  200,
+			ExpectedStatus:  cfg.ExpectedStatus.PreferredStatus(),
 		})
 		if err != nil && !errors.Is(err, ErrMonitorExists) {
 			return err

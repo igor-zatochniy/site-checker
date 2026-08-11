@@ -2,6 +2,8 @@ package sitechecker
 
 import (
 	"context"
+	"errors"
+	"net"
 	"testing"
 	"time"
 )
@@ -177,5 +179,55 @@ func TestRabbitMQReconnectDelayIsBounded(t *testing.T) {
 		if got := rabbitMQReconnectDelay(test.attempt, initial, maximum); got != test.want {
 			t.Errorf("attempt %d: delay = %s, want %s", test.attempt, got, test.want)
 		}
+	}
+}
+
+func TestRabbitMQDeadlineConnBoundsEstablishedWrites(t *testing.T) {
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+
+	conn := &rabbitMQDeadlineConn{Conn: client, writeTimeout: 50 * time.Millisecond}
+	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+
+	startedAt := time.Now()
+	_, err := conn.Write([]byte("blocked publish"))
+	assertNetworkTimeout(t, err)
+	if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
+		t.Fatalf("blocked write returned after %s, want bounded by write timeout", elapsed)
+	}
+}
+
+func TestRabbitMQDeadlineConnPreservesHandshakeDeadline(t *testing.T) {
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+
+	conn := &rabbitMQDeadlineConn{Conn: client, writeTimeout: time.Second}
+	if err := conn.SetDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+
+	startedAt := time.Now()
+	_, err := conn.Write([]byte("blocked handshake"))
+	assertNetworkTimeout(t, err)
+	if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
+		t.Fatalf("blocked handshake write returned after %s, want original handshake deadline", elapsed)
+	}
+}
+
+func assertNetworkTimeout(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("blocked write returned nil error")
+	}
+	var networkError net.Error
+	if !errors.As(err, &networkError) || !networkError.Timeout() {
+		t.Fatalf("write error = %v, want network timeout", err)
 	}
 }
