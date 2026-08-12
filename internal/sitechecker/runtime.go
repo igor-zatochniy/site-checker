@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net"
 	"net/http"
@@ -12,11 +13,18 @@ import (
 )
 
 const (
-	leaseStateRetryInitialDelay = 50 * time.Millisecond
-	leaseStateRetryMaxDelay     = time.Second
-	checkJobRetryInitialDelay   = 250 * time.Millisecond
-	checkJobRetryMaxDelay       = 30 * time.Second
+	leaseStateRetryInitialDelay       = 50 * time.Millisecond
+	leaseStateRetryMaxDelay           = time.Second
+	checkJobRetryInitialDelay         = 250 * time.Millisecond
+	checkJobRetryMaxDelay             = 30 * time.Second
+	infrastructureRequeueInitialDelay = 250 * time.Millisecond
+	infrastructureRequeueMaxBaseDelay = 4 * time.Second
 )
+
+type infrastructureRequeueBackoff struct {
+	mu       sync.Mutex
+	failures int
+}
 
 func NewConfiguredRepository(ctx context.Context, cfg Config, policy *NetworkPolicy, logger *slog.Logger) (MonitorRepository, func(), error) {
 	if cfg.StorageType == "postgres" {
@@ -158,11 +166,12 @@ func RunQueueWorkers(ctx context.Context, service *MonitorService, queue JobQueu
 
 	var wg sync.WaitGroup
 	workerErrors := make(chan error, workerCount)
+	infrastructureBackoff := &infrastructureRequeueBackoff{}
 	for workerID := 1; workerID <= workerCount; workerID++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			if err := runQueueWorker(workerCtx, workerID, service, deliveries, leaseTimeout, logger); err != nil {
+			if err := runQueueWorkerWithBackoff(workerCtx, workerID, service, deliveries, leaseTimeout, infrastructureBackoff, logger); err != nil {
 				select {
 				case workerErrors <- err:
 				default:
@@ -204,6 +213,10 @@ func RunQueueWorkers(ctx context.Context, service *MonitorService, queue JobQueu
 }
 
 func runQueueWorker(ctx context.Context, workerID int, service *MonitorService, deliveries <-chan QueueDelivery, leaseTimeout time.Duration, logger *slog.Logger) error {
+	return runQueueWorkerWithBackoff(ctx, workerID, service, deliveries, leaseTimeout, &infrastructureRequeueBackoff{}, logger)
+}
+
+func runQueueWorkerWithBackoff(ctx context.Context, workerID int, service *MonitorService, deliveries <-chan QueueDelivery, leaseTimeout time.Duration, backoff *infrastructureRequeueBackoff, logger *slog.Logger) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -212,7 +225,7 @@ func runQueueWorker(ctx context.Context, workerID int, service *MonitorService, 
 			if !ok {
 				return nil
 			}
-			if err := handleQueueDelivery(ctx, workerID, service, delivery, leaseTimeout, logger); err != nil {
+			if err := handleQueueDeliveryWithBackoff(ctx, workerID, service, delivery, leaseTimeout, backoff, logger); err != nil {
 				return err
 			}
 		}
@@ -220,25 +233,32 @@ func runQueueWorker(ctx context.Context, workerID int, service *MonitorService, 
 }
 
 func handleQueueDelivery(ctx context.Context, workerID int, service *MonitorService, delivery QueueDelivery, leaseTimeout time.Duration, logger *slog.Logger) error {
+	return handleQueueDeliveryWithBackoff(ctx, workerID, service, delivery, leaseTimeout, &infrastructureRequeueBackoff{}, logger)
+}
+
+func handleQueueDeliveryWithBackoff(ctx context.Context, workerID int, service *MonitorService, delivery QueueDelivery, leaseTimeout time.Duration, backoff *infrastructureRequeueBackoff, logger *slog.Logger) error {
 	monitor, err := service.Get(ctx, delivery.Job.MonitorID)
 	if err != nil {
 		if errors.Is(err, ErrMonitorNotFound) {
+			backoff.Reset()
 			_ = delivery.Ack(ctx)
 			return nil
 		}
-		return requeueInfrastructureFailure(ctx, delivery, err, workerID, "monitor lookup", service.metrics, logger)
+		return requeueInfrastructureFailure(ctx, delivery, err, workerID, "monitor lookup", backoff, service.metrics, logger)
 	}
 
 	lease, err := service.MarkProcessing(ctx, delivery.Job.MonitorID, delivery.Job.JobID, delivery.Job.Attempt, time.Now().UTC(), leaseTimeout)
 	if err != nil {
 		if errors.Is(err, ErrStaleJob) || errors.Is(err, ErrJobAlreadyProcessing) || errors.Is(err, ErrMonitorNotFound) {
+			backoff.Reset()
 			if ackErr := delivery.Ack(ctx); ackErr != nil {
 				logger.Warn("Failed to ack inactive job", "worker", workerID, "job_id", delivery.Job.JobID, "error", ackErr)
 			}
 			return nil
 		}
-		return requeueInfrastructureFailure(ctx, delivery, err, workerID, "processing state transition", service.metrics, logger)
+		return requeueInfrastructureFailure(ctx, delivery, err, workerID, "processing state transition", backoff, service.metrics, logger)
 	}
+	backoff.Reset()
 
 	checkCtx, cancel := context.WithTimeout(ctx, time.Duration(monitor.TimeoutSeconds)*time.Second)
 	result := service.checker.CheckMonitor(checkCtx, monitor)
@@ -295,9 +315,24 @@ func requeueInfrastructureFailure(
 	cause error,
 	workerID int,
 	operation string,
+	backoff *infrastructureRequeueBackoff,
 	metrics *Metrics,
 	logger *slog.Logger,
 ) error {
+	delay := backoff.NextDelay(delivery.Job.JobID, workerID)
+	timer := time.NewTimer(delay)
+	select {
+	case <-ctx.Done():
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		return nil
+	case <-timer.C:
+	}
+
 	requeue := delivery.Requeue
 	if requeue == nil {
 		requeue = func(ctx context.Context) error {
@@ -320,9 +355,36 @@ func requeueInfrastructureFailure(
 		"worker", workerID,
 		"job_id", delivery.Job.JobID,
 		"operation", operation,
+		"backoff", delay,
 		"error", cause,
 	)
 	return nil
+}
+
+func (b *infrastructureRequeueBackoff) NextDelay(jobID string, workerID int) time.Duration {
+	b.mu.Lock()
+	b.failures++
+	attempt := b.failures
+	b.mu.Unlock()
+
+	delay := infrastructureRequeueInitialDelay
+	for current := 1; current < attempt && delay < infrastructureRequeueMaxBaseDelay; current++ {
+		delay = min(delay*2, infrastructureRequeueMaxBaseDelay)
+	}
+	jitterLimit := delay / 4
+	if jitterLimit <= 0 {
+		return delay
+	}
+	hasher := fnv.New64a()
+	_, _ = fmt.Fprintf(hasher, "%s:%d:%d", jobID, workerID, attempt)
+	jitter := time.Duration(hasher.Sum64() % uint64(jitterLimit+1))
+	return delay + jitter
+}
+
+func (b *infrastructureRequeueBackoff) Reset() {
+	b.mu.Lock()
+	b.failures = 0
+	b.mu.Unlock()
 }
 
 func checkJobRetryDelay(attempt int) time.Duration {

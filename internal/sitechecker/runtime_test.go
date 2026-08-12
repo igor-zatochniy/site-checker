@@ -390,8 +390,12 @@ func TestHandleQueueDeliveryRequeuesInfrastructureFailureWithoutConsumingAttempt
 		},
 	}
 
+	startedAt := time.Now()
 	if err := handleQueueDelivery(ctx, 1, service, delivery, time.Minute, logger); err != nil {
 		t.Fatalf("handleQueueDelivery returned error after successful requeue: %v", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed < infrastructureRequeueInitialDelay {
+		t.Fatalf("infrastructure requeue completed after %s, want backoff of at least %s", elapsed, infrastructureRequeueInitialDelay)
 	}
 	if ackCalls != 0 || nackCalls != 0 || requeueCalls != 1 {
 		t.Fatalf("ack=%d nack=%d requeue=%d, want only one infrastructure requeue", ackCalls, nackCalls, requeueCalls)
@@ -404,6 +408,63 @@ func TestHandleQueueDeliveryRequeuesInfrastructureFailureWithoutConsumingAttempt
 	}
 	if output := metrics.Prometheus(); !strings.Contains(output, "site_checker_job_infrastructure_requeues_total 1") {
 		t.Fatalf("Prometheus output does not contain the infrastructure requeue counter: %s", output)
+	}
+}
+
+func TestInfrastructureRequeueBackoffIsBoundedAndResettable(t *testing.T) {
+	backoff := &infrastructureRequeueBackoff{}
+	delays := []time.Duration{
+		backoff.NextDelay("job_1", 1),
+		backoff.NextDelay("job_1", 1),
+		backoff.NextDelay("job_1", 1),
+		backoff.NextDelay("job_1", 1),
+		backoff.NextDelay("job_1", 1),
+		backoff.NextDelay("job_1", 1),
+	}
+	for index, delay := range delays {
+		if delay < infrastructureRequeueInitialDelay || delay > infrastructureRequeueMaxBaseDelay+infrastructureRequeueMaxBaseDelay/4 {
+			t.Fatalf("delay %d = %s, outside configured bounds", index, delay)
+		}
+		if index > 0 && delay < delays[index-1]*4/5 {
+			t.Fatalf("delay %d = %s unexpectedly below previous delay %s", index, delay, delays[index-1])
+		}
+	}
+	backoff.Reset()
+	resetDelay := backoff.NextDelay("job_1", 1)
+	if resetDelay < infrastructureRequeueInitialDelay || resetDelay > infrastructureRequeueInitialDelay+infrastructureRequeueInitialDelay/4 {
+		t.Fatalf("reset delay = %s, want initial delay with bounded jitter", resetDelay)
+	}
+}
+
+func TestInfrastructureRequeueBackoffStopsOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	service := NewMonitorService(
+		failingMonitorRepository{err: errors.New("postgres is unavailable")},
+		nil,
+		NewMetrics("test", "commit", "date", 0),
+		AlertPolicy{},
+		logger,
+	)
+	requeueCalls := 0
+	delivery := QueueDelivery{
+		Job: CheckJobMessage{JobID: "job_cancelled_backoff", MonitorID: "mon_1", Attempt: 1},
+		Requeue: func(context.Context) error {
+			requeueCalls++
+			return nil
+		},
+	}
+
+	startedAt := time.Now()
+	if err := handleQueueDelivery(ctx, 1, service, delivery, time.Minute, logger); err != nil {
+		t.Fatalf("handleQueueDelivery returned error during cancellation: %v", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 100*time.Millisecond {
+		t.Fatalf("cancellation took %s, want immediate backoff interruption", elapsed)
+	}
+	if requeueCalls != 0 {
+		t.Fatalf("requeue calls = %d, want 0 after cancellation", requeueCalls)
 	}
 }
 

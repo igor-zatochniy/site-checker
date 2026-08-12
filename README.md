@@ -37,7 +37,7 @@ STORAGE_TYPE=memory|postgres
 QUEUE_TYPE=memory|rabbitmq
 ```
 
-Without `DATABASE_URL` or `RABBITMQ_URL`, the service uses in-memory backends for local development. Production and Kubernetes use PostgreSQL and RabbitMQ.
+Without `DATABASE_URL` or `RABBITMQ_URL`, the `all` role can use in-memory backends only in `local`, `development`, or `demo` environments. Production requires PostgreSQL, while split scheduler and worker roles additionally require RabbitMQ.
 
 ```mermaid
 flowchart LR
@@ -218,6 +218,8 @@ docker run --rm \
   --read-only \
   --cpus=0.5 \
   --memory=256m \
+  -e APP_ENV=local \
+  -e AUTH_DISABLED=true \
   -p 8080:8080 \
   site-checker
 ```
@@ -236,19 +238,23 @@ Create the local Secret file first:
 cp deploy/kubernetes/secret.example.yaml deploy/kubernetes/local/secret.yaml
 ```
 
-Then apply the local overlay:
+Apply the untracked Secret explicitly, then render the secret-free base:
 
 ```bash
-kubectl apply -k deploy/kubernetes/local/
+kubectl apply -f deploy/kubernetes/namespace.yaml
+kubectl apply -f deploy/kubernetes/local/secret.yaml
+kubectl apply -k deploy/kubernetes/
 ```
 
-The local `deploy/kubernetes/local/secret.yaml` file is ignored by git and is included by the local Kustomize overlay. The checked-in base stays secret-free so CI can render immutable release manifests and production deployments can provide secrets through External Secrets, SOPS, Sealed Secrets, or a managed secret store.
+The local `deploy/kubernetes/local/secret.yaml` file is ignored by git. The checked-in base stays secret-free so CI can render immutable release manifests and production deployments can provide secrets through External Secrets, SOPS, Sealed Secrets, or a managed secret store.
 
 The checked-in Kustomize base uses a fixed version tag and never uses `latest`. A `v*` Git tag publishes both the release tag and an immutable `sha-<commit>` tag to GHCR. CI also captures the pushed image digest and uploads a rendered Kubernetes manifest artifact whose application containers use `image@sha256:...`. Use that artifact for production releases:
 
 ```bash
 kubectl apply -f site-checker-kubernetes-vX.Y.Z.yaml
 ```
+
+When alerts are enabled, apply the matching digest-pinned `site-checker-alerts-vX.Y.Z.yaml` release artifact after configuring the webhook Secret.
 
 The Kubernetes setup demonstrates:
 
@@ -291,13 +297,14 @@ Expected demonstration:
 - A check result, incident transition, cooldown decision, and alert outbox insert share one PostgreSQL transaction. Webhook delivery is intentionally at-least-once; a stable `Idempotency-Key` lets receivers deduplicate the rare retry after an ambiguous network outcome.
 - Built-in demo URLs are opt-in. Normal deployments start with an empty monitor set to avoid sending unintended traffic to third-party websites.
 - RabbitMQ publication and consumption recover from runtime connection loss with bounded exponential backoff. Delivery remains at-least-once because a connection can fail after the broker accepted a publish or acknowledgement; persisted job states, monotonic attempts, unique result job IDs, and fenced processing leases make those retry windows safe.
+- PostgreSQL retention removes expired history in indexed batches owned by the scheduler. The feature is opt-in in application configuration and explicitly enabled in the supplied scheduler deployments.
 - Kubernetes source manifests use a fixed readable tag for local rendering, while release CI produces a digest-pinned deployment bundle so production rollouts reference immutable image content.
 
 ## Known limitations
 
 - The in-memory repository and queue are intended for local development and tests, not durable production use.
 - External HTTP checks are at-least-once: if a worker exits after the request completes but before the result transaction commits, the persisted lease recovery can repeat that request.
-- PostgreSQL retention and partitioning for historical `check_jobs`, `check_results`, incidents, and delivered alert outbox rows are deployment-specific and are not automated by the service.
+- PostgreSQL retention uses bounded deletes; table partitioning and archival to long-term storage remain deployment-specific.
 - Webhook receivers should honor `Idempotency-Key` because no distributed system can guarantee exactly-once delivery across a database commit and an external HTTP endpoint.
 - PostgreSQL and RabbitMQ Kubernetes manifests are suitable for local or demonstration clusters. Production deployments should use managed services or hardened StatefulSets with backups, persistence, TLS, monitoring, and secret rotation.
 - KEDA queue-based scaling requires the KEDA operator to be installed separately.
@@ -309,12 +316,12 @@ Expected demonstration:
 | --- | --- | --- |
 | `APP_ENV` | `production` | Runtime environment label. `demo` enables built-in demo seed links. |
 | `APP_ROLE` | `all` | Runtime role: `all`, `api`, `scheduler`, `worker`, or `alert-dispatcher`. |
-| `STORAGE_TYPE` | `memory` or `postgres` when `DATABASE_URL` is set | Storage backend. |
+| `STORAGE_TYPE` | `memory` or `postgres` when `DATABASE_URL` is set | Storage backend. Production and split `api`/`scheduler`/`worker` roles require PostgreSQL. |
 | `DATABASE_URL` | empty | PostgreSQL connection string. Required for `STORAGE_TYPE=postgres`. |
 | `RUN_MIGRATIONS` | `true` | Runs embedded SQL migrations on startup. |
 | `API_KEY` | empty | API key with at least 24 characters. Required for `api` and `all` roles unless local authentication is explicitly disabled. |
 | `AUTH_DISABLED` | `false` | Explicitly disables API authentication. Allowed only with `APP_ENV=local`, `development`, or `demo`; rejected in production. |
-| `QUEUE_TYPE` | `memory` or `rabbitmq` when `RABBITMQ_URL` is set | Job queue backend. |
+| `QUEUE_TYPE` | `memory` or `rabbitmq` when `RABBITMQ_URL` is set | Job queue backend. Split `scheduler` and `worker` roles require RabbitMQ. |
 | `RABBITMQ_URL` | empty | RabbitMQ AMQP URL. Required for `QUEUE_TYPE=rabbitmq`. |
 | `RABBITMQ_CONNECT_TIMEOUT` | `5s` | Timeout for one RabbitMQ TCP and protocol connection attempt. |
 | `RABBITMQ_PUBLISH_TIMEOUT` | `10s` | End-to-end limit for publishing and receiving a broker confirmation; socket writes use the same upper bound. |
@@ -351,10 +358,15 @@ Expected demonstration:
 | `ALERT_MAX_ATTEMPTS` | `8` | Delivery attempts before an outbox event is marked `dead`. |
 | `ALERT_RETRY_INITIAL_BACKOFF` | `1s` | Initial persisted retry delay. |
 | `ALERT_RETRY_MAX_BACKOFF` | `5m` | Maximum persisted retry delay. |
+| `RETENTION_ENABLED` | `false` | Enables PostgreSQL history cleanup. Allowed only for `all` or `scheduler` roles and explicitly enabled by the supplied scheduler deployments. |
+| `RETENTION_INTERVAL` | `1m` | Delay between bounded cleanup passes. |
+| `RETENTION_BATCH_SIZE` | `10000` | Maximum rows deleted from each retained table in one pass. |
+| `CHECK_RESULTS_RETENTION` | `2160h` | Retains check results for 90 days. |
+| `CHECK_JOBS_RETENTION` | `720h` | Retains completed/dead jobs for 30 days. Active jobs are never deleted. |
+| `ALERT_OUTBOX_RETENTION` | `720h` | Retains delivered/dead alert events for 30 days. Pending/processing events are never deleted. |
+| `RESOLVED_INCIDENT_RETENTION` | `8760h` | Retains resolved incidents for 365 days and deletes them only after all related outbox rows are gone. |
 | `USER_AGENT` | `site-checker` | User-Agent used for checks. |
 | `ENABLE_PPROF` | `false` | Enables `/debug/pprof/` endpoints. |
-| `READINESS_STALE_AFTER` | `CHECK_INTERVAL*3 + HTTP_TIMEOUT` | Marks readiness unhealthy if checks are stale. |
-| `STARTUP_GRACE_PERIOD` | `CHECK_INTERVAL + HTTP_TIMEOUT + 30s` | Allows startup before the first completed check. |
 
 ## URL File Example
 
@@ -380,7 +392,7 @@ APP_ENV=demo AUTH_DISABLED=true go run .
 
 By default, Site Checker blocks private networks, loopback addresses, link-local ranges, metadata IPs such as `169.254.169.254`, unsupported schemes, userinfo in URLs, unexpected ports, unsafe redirects, and environment proxies. Enable overrides only for trusted internal deployments.
 
-`deploy/kubernetes/secret.example.yaml` is a template only. Copy it to an untracked `deploy/kubernetes/local/secret.yaml` and apply `deploy/kubernetes/local/` for local clusters. For production, use External Secrets Operator, SOPS, Sealed Secrets, or a managed secret store with rotation.
+`deploy/kubernetes/secret.example.yaml` is a template only. Copy it to an untracked `deploy/kubernetes/local/secret.yaml`, apply that file explicitly, and then apply the secret-free Kustomize base. For production, use External Secrets Operator, SOPS, Sealed Secrets, or a managed secret store with rotation.
 
 ## License
 

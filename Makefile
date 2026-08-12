@@ -33,7 +33,7 @@ docker-build:
 
 docker-smoke: docker-build
 	-docker rm -f $(CONTAINER)
-	docker run -d --name $(CONTAINER) -e APP_ROLE=api -e API_KEY=site-checker-smoke-api-key -e HEALTH_ADDR=:8080 $(IMAGE)
+	docker run -d --name $(CONTAINER) -e APP_ENV=local -e APP_ROLE=all -e API_KEY=site-checker-smoke-api-key -e HEALTH_ADDR=:8080 $(IMAGE)
 	docker exec $(CONTAINER) wget -qO- http://127.0.0.1:8080/healthz
 	docker exec $(CONTAINER) wget -qO- http://127.0.0.1:8080/readyz
 	docker exec $(CONTAINER) wget -qO- http://127.0.0.1:8080/metrics

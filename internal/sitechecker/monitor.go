@@ -313,6 +313,9 @@ func (s *MonitorStore) Update(id string, patch MonitorPatch) (Monitor, error) {
 	}, s.policy); err != nil {
 		return Monitor{}, err
 	}
+	checkSemanticsChanged := updated.URL != monitor.URL ||
+		updated.TimeoutSeconds != monitor.TimeoutSeconds ||
+		updated.ExpectedStatus != monitor.ExpectedStatus
 
 	if existingID, exists := s.byURL[updated.URL]; exists && existingID != id {
 		return Monitor{}, ErrMonitorExists
@@ -326,12 +329,21 @@ func (s *MonitorStore) Update(id string, patch MonitorPatch) (Monitor, error) {
 	updated.UpdatedAt = now
 	if updated.Enabled {
 		updated.Status = monitorStatusActive
-		if updated.NextCheckAt.IsZero() || updated.NextCheckAt.Before(now) {
+		if checkSemanticsChanged || updated.NextCheckAt.IsZero() || updated.NextCheckAt.Before(now) {
 			updated.NextCheckAt = now
 		}
 	} else {
 		updated.Status = monitorStatusDisabled
 		s.finishActiveJobLocked(id, checkJobStatusDead, "monitor disabled", now)
+	}
+	if checkSemanticsChanged {
+		updated.LastStatusCode = 0
+		updated.LastLatencyMS = 0
+		updated.LastCheckedAt = time.Time{}
+		updated.LastError = ""
+		if updated.Enabled {
+			s.finishActiveJobLocked(id, checkJobStatusDead, "monitor configuration changed", now)
+		}
 	}
 
 	s.byID[id] = updated

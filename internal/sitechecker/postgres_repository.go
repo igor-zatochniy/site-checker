@@ -166,10 +166,13 @@ func (r *PostgresMonitorRepository) Update(ctx context.Context, id string, patch
 	}
 
 	now := time.Now().UTC()
+	checkSemanticsChanged := updated.URL != current.URL ||
+		updated.TimeoutSeconds != current.TimeoutSeconds ||
+		updated.ExpectedStatus != current.ExpectedStatus
 	updated.UpdatedAt = now
 	if updated.Enabled {
 		updated.Status = monitorStatusActive
-		if updated.NextCheckAt.IsZero() || updated.NextCheckAt.Before(now) {
+		if checkSemanticsChanged || updated.NextCheckAt.IsZero() || updated.NextCheckAt.Before(now) {
 			updated.NextCheckAt = now
 		}
 	} else {
@@ -185,13 +188,17 @@ func (r *PostgresMonitorRepository) Update(ctx context.Context, id string, patch
 			status = $6,
 			enabled = $7,
 			next_check_at = $8,
-			updated_at = $9
+			updated_at = $9,
+			last_status_code = CASE WHEN $10 THEN NULL ELSE last_status_code END,
+			last_latency_ms = CASE WHEN $10 THEN NULL ELSE last_latency_ms END,
+			last_checked_at = CASE WHEN $10 THEN NULL ELSE last_checked_at END,
+			last_error = CASE WHEN $10 THEN '' ELSE last_error END
 		WHERE id = $1
 		RETURNING id, url, interval_seconds, timeout_seconds, expected_status,
 			status, enabled, next_check_at, created_at, updated_at,
 			last_status_code, last_latency_ms, last_checked_at, last_error
 	`, id, updated.URL, updated.IntervalSeconds, updated.TimeoutSeconds, updated.ExpectedStatus,
-		updated.Status, updated.Enabled, updated.NextCheckAt, updated.UpdatedAt)
+		updated.Status, updated.Enabled, updated.NextCheckAt, updated.UpdatedAt, checkSemanticsChanged)
 
 	monitor, err := scanMonitor(row)
 	if isUniqueViolation(err) {
@@ -203,18 +210,23 @@ func (r *PostgresMonitorRepository) Update(ctx context.Context, id string, patch
 	if err != nil {
 		return Monitor{}, err
 	}
-	if !updated.Enabled {
+	if !updated.Enabled || checkSemanticsChanged {
+		jobError := "monitor configuration changed"
+		if !updated.Enabled {
+			jobError = "monitor disabled"
+		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE check_jobs
 			SET status = 'dead',
 				completed_at = $2::timestamptz,
 				processing_started_at = NULL,
 				lease_expires_at = NULL,
-				last_error = 'monitor disabled',
+				lease_token = NULL,
+				last_error = $3,
 				updated_at = $2::timestamptz
 			WHERE monitor_id = $1
 				AND status IN ('scheduled', 'queued', 'processing', 'failed')
-		`, id, now); err != nil {
+		`, id, now, jobError); err != nil {
 			return Monitor{}, err
 		}
 	}

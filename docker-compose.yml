@@ -62,6 +62,7 @@ services:
       RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/"
       SEED_DEFAULT_LINKS: ${SEED_DEFAULT_LINKS:-false}
       SEED_URLS_FILE: ${SEED_URLS_FILE:-}
+      RETENTION_ENABLED: "true"
       HEALTH_ADDR: :8080
     depends_on:
       postgres:

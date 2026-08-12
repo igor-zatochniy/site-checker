@@ -147,7 +147,20 @@ jobs:
           EOF
           kubectl kustomize dist/release > "dist/site-checker-kubernetes-${RELEASE_TAG}.yaml"
           printf '%s\n' "${IMAGE_NAME}@${IMAGE_DIGEST}" > "dist/site-checker-image-${RELEASE_TAG}.txt"
-          test "$(grep -cF "image: ${IMAGE_NAME}@${IMAGE_DIGEST}" "dist/site-checker-kubernetes-${RELEASE_TAG}.yaml")" -eq 4
+          test "$(grep -cF "image: ${IMAGE_NAME}@${IMAGE_DIGEST}" "dist/site-checker-kubernetes-${RELEASE_TAG}.yaml")" -eq 3
+          mkdir -p dist/release-alerts
+          cat > dist/release-alerts/kustomization.yaml <<EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          resources:
+            - ../../deploy/kubernetes/alerts
+          images:
+            - name: ghcr.io/igor-zatochniy/site-checker
+              newName: ${IMAGE_NAME}
+              digest: ${IMAGE_DIGEST}
+          EOF
+          kubectl kustomize dist/release-alerts > "dist/site-checker-alerts-${RELEASE_TAG}.yaml"
+          test "$(grep -cF "image: ${IMAGE_NAME}@${IMAGE_DIGEST}" "dist/site-checker-alerts-${RELEASE_TAG}.yaml")" -eq 1
 
       - name: Upload immutable Kubernetes release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -156,6 +169,7 @@ jobs:
           name: site-checker-kubernetes-${{ github.ref_name }}
           path: |
             dist/site-checker-kubernetes-${{ github.ref_name }}.yaml
+            dist/site-checker-alerts-${{ github.ref_name }}.yaml
             dist/site-checker-image-${{ github.ref_name }}.txt
           if-no-files-found: error
 

@@ -12,6 +12,7 @@ This directory contains a split backend-platform deployment for Site Checker:
 - NetworkPolicy default-deny baseline with explicit ingress and egress allowances.
 - ConfigMap, Services, probes, resource requests and limits.
 - Non-root containers, dropped Linux capabilities, rolling updates, and graceful termination.
+- Scheduler-owned bounded retention for expired PostgreSQL history.
 
 The repository includes `secret.example.yaml` as a template only. Copy it to an untracked local overlay Secret before applying local manifests. The checked-in base stays secret-free so CI can render release artifacts and production deployments can provide secrets through External Secrets, SOPS, Sealed Secrets, or a managed secret store.
 
@@ -19,7 +20,9 @@ Apply locally:
 
 ```bash
 cp deploy/kubernetes/secret.example.yaml deploy/kubernetes/local/secret.yaml
-kubectl apply -k deploy/kubernetes/local/
+kubectl apply -f deploy/kubernetes/namespace.yaml
+kubectl apply -f deploy/kubernetes/local/secret.yaml
+kubectl apply -k deploy/kubernetes/
 ```
 
 The Kustomize base contains a fixed image tag and never uses `latest`. For every `v*` Git tag, CI pushes the release image, records its registry digest, and uploads a rendered manifest named `site-checker-kubernetes-vX.Y.Z.yaml`. Production deployments should apply that artifact because all Site Checker roles reference the immutable `image@sha256:...` value:
@@ -68,6 +71,9 @@ kubectl apply -k deploy/kubernetes/alerts/
 ```
 
 Workers create transactional alert events only when the same webhook setting is configured for them.
+For production releases, apply the digest-pinned `site-checker-alerts-vX.Y.Z.yaml` artifact uploaded by release CI instead of the source overlay.
+
+The scheduler enables retention with these defaults: check results 90 days, terminal jobs and delivered/dead outbox events 30 days, and resolved incidents 365 days. Cleanup deletes at most 10,000 rows per table each minute and never removes active jobs, pending/processing alerts, open incidents, or incidents that still have outbox rows. Adjust the retention values in `configmap.yaml` before deployment when longer history is required.
 
 Remove:
 

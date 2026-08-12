@@ -75,6 +75,15 @@ func Main(version, commit, buildDate string) {
 	service := NewMonitorService(repo, checker, metrics, alertPolicy, logger)
 	service.updateTotalLinks(ctx)
 	api := NewAPIHandler(service, cfg.APIKey, logger)
+	var retentionRepo RetentionRepository
+	if cfg.RetentionEnabled {
+		var ok bool
+		retentionRepo, ok = repo.(RetentionRepository)
+		if !ok {
+			logger.Error("Configured repository does not support data retention")
+			os.Exit(1)
+		}
+	}
 
 	var (
 		alertRepo   AlertOutboxRepository
@@ -153,6 +162,13 @@ func Main(version, commit, buildDate string) {
 		go func() {
 			defer wg.Done()
 			RunAlertDispatcher(ctx, alertRepo, alertSender, cfg, metrics, logger)
+		}()
+	}
+	if retentionRepo != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			RunRetention(ctx, retentionRepo, cfg, logger)
 		}()
 	}
 

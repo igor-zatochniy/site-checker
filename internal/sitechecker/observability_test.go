@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestObservabilityEndpoints(t *testing.T) {
@@ -17,9 +16,7 @@ func TestObservabilityEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := Config{
-		StartupGracePeriod:  time.Minute,
-		ReadinessStaleAfter: time.Minute,
-		ExpectedStatus:      statusPolicy,
+		ExpectedStatus: statusPolicy,
 	}
 	metrics := NewMetrics("test", "commit", "date", 1)
 	server := httptest.NewServer(NewObservabilityServer(":0", cfg, metrics).Handler)
@@ -43,12 +40,30 @@ func TestReadinessForSplitRoleDoesNotRequireCompletedChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := Config{
-		AppRole:             "api",
-		StartupGracePeriod:  time.Nanosecond,
-		ReadinessStaleAfter: time.Nanosecond,
-		ExpectedStatus:      statusPolicy,
+		AppRole:        "api",
+		ExpectedStatus: statusPolicy,
 	}
 	metrics := NewMetrics("test", "commit", "date", 1)
+	server := httptest.NewServer(NewObservabilityServer(":0", cfg, metrics).Handler)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestReadinessForAllRoleDoesNotRequireMonitorsOrCompletedChecks(t *testing.T) {
+	statusPolicy, err := ParseStatusPolicy("200-299")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{AppRole: "all", ExpectedStatus: statusPolicy}
+	metrics := NewMetrics("test", "commit", "date", 0)
 	server := httptest.NewServer(NewObservabilityServer(":0", cfg, metrics).Handler)
 	defer server.Close()
 
@@ -68,10 +83,8 @@ func TestReadinessReportsDependencyFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := Config{
-		AppRole:             "worker",
-		StartupGracePeriod:  time.Minute,
-		ReadinessStaleAfter: time.Minute,
-		ExpectedStatus:      statusPolicy,
+		AppRole:        "worker",
+		ExpectedStatus: statusPolicy,
 	}
 	metrics := NewMetrics("test", "commit", "date", 1)
 	server := httptest.NewServer(NewObservabilityServerWithDependencies(":0", cfg, metrics, []ReadinessDependency{

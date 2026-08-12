@@ -11,92 +11,103 @@ import (
 )
 
 const (
-	defaultAppRole                  = "all"
-	defaultStorageType              = "memory"
-	defaultQueueType                = "memory"
-	defaultWorkerCount              = 10
-	defaultSchedulerBatchSize       = 100
-	defaultCheckInterval            = 5 * time.Minute
-	defaultHTTPTimeout              = 5 * time.Second
-	defaultCheckLeaseTimeout        = 2 * time.Minute
-	defaultHealthAddr               = ":8080"
-	defaultMaxRedirects             = 3
-	defaultMaxBodyBytes             = 64 * 1024
-	defaultMaxHeaderBytes           = 64 * 1024
-	defaultExpectedStatus           = "200-399"
-	defaultAllowedPorts             = "80,443"
-	defaultAlertFailureThreshold    = 3
-	defaultAlertCooldown            = 10 * time.Minute
-	defaultAlertDispatchInterval    = time.Second
-	defaultAlertDispatchBatch       = 50
-	defaultAlertLeaseTimeout        = 30 * time.Second
-	defaultAlertDeliveryTimeout     = 5 * time.Second
-	defaultAlertMaxAttempts         = 8
-	defaultAlertRetryInitial        = time.Second
-	defaultAlertRetryMax            = 5 * time.Minute
-	defaultUserAgent                = "site-checker"
-	defaultQueueBufferSize          = 1000
-	defaultQueuePrefetch            = 10
-	defaultMaxJobAttempts           = 3
-	defaultQueueName                = "site_checker.checks"
-	defaultDeadLetterQueueName      = "site_checker.checks.dead"
-	defaultRabbitMQConnectTimeout   = 5 * time.Second
-	defaultRabbitMQPublishTimeout   = 10 * time.Second
-	defaultRabbitMQReconnectInitial = time.Second
-	defaultRabbitMQReconnectMax     = 30 * time.Second
-	processingLeaseSafetyMargin     = 30 * time.Second
-	minAPIKeyLength                 = 24
+	defaultAppRole                   = "all"
+	defaultStorageType               = "memory"
+	defaultQueueType                 = "memory"
+	defaultWorkerCount               = 10
+	defaultSchedulerBatchSize        = 100
+	defaultCheckInterval             = 5 * time.Minute
+	defaultHTTPTimeout               = 5 * time.Second
+	defaultCheckLeaseTimeout         = 2 * time.Minute
+	defaultHealthAddr                = ":8080"
+	defaultMaxRedirects              = 3
+	defaultMaxBodyBytes              = 64 * 1024
+	defaultMaxHeaderBytes            = 64 * 1024
+	defaultExpectedStatus            = "200-399"
+	defaultAllowedPorts              = "80,443"
+	defaultAlertFailureThreshold     = 3
+	defaultAlertCooldown             = 10 * time.Minute
+	defaultAlertDispatchInterval     = time.Second
+	defaultAlertDispatchBatch        = 50
+	defaultAlertLeaseTimeout         = 30 * time.Second
+	defaultAlertDeliveryTimeout      = 5 * time.Second
+	defaultAlertMaxAttempts          = 8
+	defaultAlertRetryInitial         = time.Second
+	defaultAlertRetryMax             = 5 * time.Minute
+	defaultUserAgent                 = "site-checker"
+	defaultQueueBufferSize           = 1000
+	defaultQueuePrefetch             = 10
+	defaultMaxJobAttempts            = 3
+	defaultQueueName                 = "site_checker.checks"
+	defaultDeadLetterQueueName       = "site_checker.checks.dead"
+	defaultRabbitMQConnectTimeout    = 5 * time.Second
+	defaultRabbitMQPublishTimeout    = 10 * time.Second
+	defaultRabbitMQReconnectInitial  = time.Second
+	defaultRabbitMQReconnectMax      = 30 * time.Second
+	defaultRetentionInterval         = time.Minute
+	defaultRetentionBatchSize        = 10000
+	defaultCheckResultsRetention     = 90 * 24 * time.Hour
+	defaultCheckJobsRetention        = 30 * 24 * time.Hour
+	defaultAlertOutboxRetention      = 30 * 24 * time.Hour
+	defaultResolvedIncidentRetention = 365 * 24 * time.Hour
+	processingLeaseSafetyMargin      = 30 * time.Second
+	minAPIKeyLength                  = 24
 )
 
 type Config struct {
-	AppEnv                   string
-	AppRole                  string
-	StorageType              string
-	DatabaseURL              string
-	RunMigrations            bool
-	APIKey                   string
-	AuthDisabled             bool
-	QueueType                string
-	RabbitMQURL              string
-	RabbitMQConnectTimeout   time.Duration
-	RabbitMQPublishTimeout   time.Duration
-	RabbitMQReconnectInitial time.Duration
-	RabbitMQReconnectMax     time.Duration
-	QueueName                string
-	DeadLetterQueueName      string
-	QueueBufferSize          int
-	QueuePrefetch            int
-	MaxJobAttempts           int
-	WorkerCount              int
-	SchedulerBatchSize       int
-	CheckInterval            time.Duration
-	HTTPTimeout              time.Duration
-	CheckLeaseTimeout        time.Duration
-	HealthAddr               string
-	ReadinessStaleAfter      time.Duration
-	StartupGracePeriod       time.Duration
-	MaxRedirects             int
-	MaxBodyBytes             int64
-	MaxHeaderBytes           int64
-	AllowPrivateNetworks     bool
-	AllowProxyEnv            bool
-	AllowedPorts             map[int]struct{}
-	URLsFile                 string
-	SeedURLsFile             string
-	SeedDefaultLinks         bool
-	ExpectedStatus           StatusPolicy
-	AlertWebhookURL          string
-	AlertFailureThreshold    int
-	AlertCooldown            time.Duration
-	AlertDispatchInterval    time.Duration
-	AlertDispatchBatchSize   int
-	AlertLeaseTimeout        time.Duration
-	AlertDeliveryTimeout     time.Duration
-	AlertMaxAttempts         int
-	AlertRetryInitialBackoff time.Duration
-	AlertRetryMaxBackoff     time.Duration
-	UserAgent                string
-	EnablePprof              bool
+	AppEnv                    string
+	AppRole                   string
+	StorageType               string
+	DatabaseURL               string
+	RunMigrations             bool
+	APIKey                    string
+	AuthDisabled              bool
+	QueueType                 string
+	RabbitMQURL               string
+	RabbitMQConnectTimeout    time.Duration
+	RabbitMQPublishTimeout    time.Duration
+	RabbitMQReconnectInitial  time.Duration
+	RabbitMQReconnectMax      time.Duration
+	QueueName                 string
+	DeadLetterQueueName       string
+	QueueBufferSize           int
+	QueuePrefetch             int
+	MaxJobAttempts            int
+	WorkerCount               int
+	SchedulerBatchSize        int
+	CheckInterval             time.Duration
+	HTTPTimeout               time.Duration
+	CheckLeaseTimeout         time.Duration
+	HealthAddr                string
+	MaxRedirects              int
+	MaxBodyBytes              int64
+	MaxHeaderBytes            int64
+	AllowPrivateNetworks      bool
+	AllowProxyEnv             bool
+	AllowedPorts              map[int]struct{}
+	URLsFile                  string
+	SeedURLsFile              string
+	SeedDefaultLinks          bool
+	ExpectedStatus            StatusPolicy
+	AlertWebhookURL           string
+	AlertFailureThreshold     int
+	AlertCooldown             time.Duration
+	AlertDispatchInterval     time.Duration
+	AlertDispatchBatchSize    int
+	AlertLeaseTimeout         time.Duration
+	AlertDeliveryTimeout      time.Duration
+	AlertMaxAttempts          int
+	AlertRetryInitialBackoff  time.Duration
+	AlertRetryMaxBackoff      time.Duration
+	RetentionEnabled          bool
+	RetentionInterval         time.Duration
+	RetentionBatchSize        int
+	CheckResultsRetention     time.Duration
+	CheckJobsRetention        time.Duration
+	AlertOutboxRetention      time.Duration
+	ResolvedIncidentRetention time.Duration
+	UserAgent                 string
+	EnablePprof               bool
 }
 
 func LoadConfig() (Config, error) {
@@ -169,11 +180,15 @@ func LoadConfig() (Config, error) {
 	cfg.AlertMaxAttempts = envInt("ALERT_MAX_ATTEMPTS", defaultAlertMaxAttempts, 1, 100, &errs)
 	cfg.AlertRetryInitialBackoff = envDuration("ALERT_RETRY_INITIAL_BACKOFF", defaultAlertRetryInitial, 100*time.Millisecond, time.Hour, &errs)
 	cfg.AlertRetryMaxBackoff = envDuration("ALERT_RETRY_MAX_BACKOFF", defaultAlertRetryMax, 100*time.Millisecond, 24*time.Hour, &errs)
+	cfg.RetentionEnabled = envBool("RETENTION_ENABLED", false, &errs)
+	cfg.RetentionInterval = envDuration("RETENTION_INTERVAL", defaultRetentionInterval, time.Minute, 24*time.Hour, &errs)
+	cfg.RetentionBatchSize = envInt("RETENTION_BATCH_SIZE", defaultRetentionBatchSize, 1, 100000, &errs)
+	cfg.CheckResultsRetention = envDuration("CHECK_RESULTS_RETENTION", defaultCheckResultsRetention, time.Hour, 10*365*24*time.Hour, &errs)
+	cfg.CheckJobsRetention = envDuration("CHECK_JOBS_RETENTION", defaultCheckJobsRetention, time.Hour, 10*365*24*time.Hour, &errs)
+	cfg.AlertOutboxRetention = envDuration("ALERT_OUTBOX_RETENTION", defaultAlertOutboxRetention, time.Hour, 10*365*24*time.Hour, &errs)
+	cfg.ResolvedIncidentRetention = envDuration("RESOLVED_INCIDENT_RETENTION", defaultResolvedIncidentRetention, time.Hour, 10*365*24*time.Hour, &errs)
 	cfg.UserAgent = envString("USER_AGENT", defaultUserAgent)
 	cfg.EnablePprof = envBool("ENABLE_PPROF", false, &errs)
-
-	cfg.ReadinessStaleAfter = envDuration("READINESS_STALE_AFTER", cfg.CheckInterval*3+cfg.HTTPTimeout, cfg.CheckInterval+cfg.HTTPTimeout, 7*24*time.Hour, &errs)
-	cfg.StartupGracePeriod = envDuration("STARTUP_GRACE_PERIOD", cfg.CheckInterval+cfg.HTTPTimeout+30*time.Second, time.Second, time.Hour, &errs)
 
 	statusPolicy, err := ParseStatusPolicy(envString("EXPECTED_STATUS", defaultExpectedStatus))
 	if err != nil {
@@ -224,6 +239,29 @@ func LoadConfig() (Config, error) {
 	}
 	if cfg.QueueType == "rabbitmq" && cfg.RabbitMQURL == "" {
 		errs = append(errs, errors.New("RABBITMQ_URL is required when QUEUE_TYPE=rabbitmq"))
+	}
+	if cfg.RetentionEnabled {
+		if cfg.StorageType != "postgres" {
+			errs = append(errs, errors.New("STORAGE_TYPE=postgres is required when RETENTION_ENABLED=true"))
+		}
+		if cfg.AppRole != "all" && cfg.AppRole != "scheduler" {
+			errs = append(errs, errors.New("RETENTION_ENABLED=true requires APP_ROLE=all or APP_ROLE=scheduler"))
+		}
+	}
+	if cfg.AppEnv == "production" && cfg.StorageType != "postgres" {
+		errs = append(errs, errors.New("STORAGE_TYPE=postgres is required in production"))
+	}
+	switch cfg.AppRole {
+	case "api", "scheduler", "worker":
+		if cfg.StorageType != "postgres" {
+			errs = append(errs, fmt.Errorf("STORAGE_TYPE=postgres is required for APP_ROLE=%s", cfg.AppRole))
+		}
+	}
+	switch cfg.AppRole {
+	case "scheduler", "worker":
+		if cfg.QueueType != "rabbitmq" {
+			errs = append(errs, fmt.Errorf("QUEUE_TYPE=rabbitmq is required for APP_ROLE=%s", cfg.AppRole))
+		}
 	}
 	if cfg.RabbitMQReconnectMax < cfg.RabbitMQReconnectInitial {
 		errs = append(errs, errors.New("RABBITMQ_RECONNECT_MAX_BACKOFF must be greater than or equal to RABBITMQ_RECONNECT_INITIAL_BACKOFF"))

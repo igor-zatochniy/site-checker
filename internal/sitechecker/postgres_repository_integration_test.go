@@ -443,6 +443,200 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if nextPeriodicJob.Attempt != 0 {
 		t.Fatalf("next periodic attempt = %d, want 0", nextPeriodicJob.Attempt)
 	}
+
+	verifyPostgresConfigurationUpdateInvalidatesActiveJob(t, ctx, repo)
+	verifyPostgresRetentionDeletesOnlyExpiredTerminalData(t, ctx, repo)
+}
+
+func verifyPostgresConfigurationUpdateInvalidatesActiveJob(
+	t *testing.T,
+	ctx context.Context,
+	repo *PostgresMonitorRepository,
+) {
+	t.Helper()
+	monitor, err := repo.Create(ctx, MonitorInput{
+		URL:             "https://configuration-a.example.com",
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	jobs, err := repo.ClaimDueJobs(ctx, 100, now, time.Minute, defaultMaxJobAttempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID := findClaimedJobID(jobs, monitor.ID)
+	if jobID == "" {
+		t.Fatalf("no job claimed for monitor %s", monitor.ID)
+	}
+	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID, now); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 1, now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newURL := "https://configuration-b.example.com"
+	updated, err := repo.Update(ctx, monitor.ID, MonitorPatch{URL: &newURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.URL != newURL || updated.LastStatusCode != 0 || !updated.LastCheckedAt.IsZero() {
+		t.Fatalf("updated monitor = %+v", updated)
+	}
+
+	_, err = repo.AddCheck(ctx, CheckRecord{
+		ID:         "check_stale_configuration",
+		JobID:      jobID,
+		MonitorID:  monitor.ID,
+		StatusCode: 500,
+		Error:      "old target failed",
+		Success:    false,
+		CheckedAt:  time.Now().UTC(),
+	}, lease, AlertPolicy{Enabled: true, FailureThreshold: 1})
+	if !errors.Is(err, ErrStaleJob) {
+		t.Fatalf("AddCheck error = %v, want ErrStaleJob", err)
+	}
+	checks, total, err := repo.ListChecks(ctx, monitor.ID, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 0 || len(checks) != 0 {
+		t.Fatalf("checks = %+v total=%d, want none", checks, total)
+	}
+	job, err := repo.GetCheckJob(ctx, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != checkJobStatusDead || job.LastError != "monitor configuration changed" || job.LeaseToken != "" {
+		t.Fatalf("invalidated job = %+v", job)
+	}
+	incidents, _, err := repo.ListIncidents(ctx, "", 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, incident := range incidents {
+		if incident.MonitorID == monitor.ID {
+			t.Fatalf("stale result created incident %+v", incident)
+		}
+	}
+}
+
+func verifyPostgresRetentionDeletesOnlyExpiredTerminalData(
+	t *testing.T,
+	ctx context.Context,
+	repo *PostgresMonitorRepository,
+) {
+	t.Helper()
+	monitor, err := repo.Create(ctx, MonitorInput{
+		URL:             "https://retention.example.com",
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	old := now.Add(-48 * time.Hour)
+
+	if _, err := repo.pool.Exec(ctx, `
+		INSERT INTO check_jobs (
+			id, monitor_id, scheduled_for, status, attempt, available_at,
+			completed_at, last_error, created_at, updated_at
+		)
+		VALUES
+			('ret_job_old', $1, $2, 'completed', 1, $2, $2, '', $2, $2),
+			('ret_job_fresh', $1, $3, 'completed', 1, $3, $3, '', $3, $3),
+			('ret_job_active', $1, $2, 'scheduled', 0, $2, NULL, '', $2, $2)
+	`, monitor.ID, old, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.pool.Exec(ctx, `
+		INSERT INTO check_results (
+			id, job_id, monitor_id, status_code, latency_ms, error, success, checked_at
+		)
+		VALUES
+			('ret_result_old', 'ret_job_old', $1, 200, 10, '', true, $2),
+			('ret_result_fresh', 'ret_job_fresh', $1, 200, 10, '', true, $3)
+	`, monitor.ID, old, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.pool.Exec(ctx, `
+		INSERT INTO incidents (
+			id, monitor_id, status, failure_count, first_failure_at, last_failure_at,
+			resolved_at, last_error, created_at, updated_at
+		)
+		VALUES
+			('ret_incident_old', $1, 'resolved', 1, $2, $2, $2, 'old', $2, $2),
+			('ret_incident_active_outbox', $1, 'resolved', 1, $2, $2, $2, 'old', $2, $2),
+			('ret_incident_fresh', $1, 'resolved', 1, $3, $3, $3, 'fresh', $3, $3)
+	`, monitor.ID, old, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.pool.Exec(ctx, `
+		INSERT INTO alert_outbox (
+			id, idempotency_key, incident_id, monitor_id, event_type, payload,
+			status, available_at, delivered_at, created_at, updated_at
+		)
+		VALUES
+			('ret_alert_old', 'ret-alert-old', 'ret_incident_old', $1, 'incident.failure', '{}'::jsonb,
+				'delivered', $2, $2, $2, $2),
+			('ret_alert_active', 'ret-alert-active', 'ret_incident_active_outbox', $1, 'incident.failure', '{}'::jsonb,
+				'pending', $2, NULL, $2, $2),
+			('ret_alert_fresh', 'ret-alert-fresh', 'ret_incident_fresh', $1, 'incident.failure', '{}'::jsonb,
+				'delivered', $3, $3, $3, $3)
+	`, monitor.ID, old, now); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := repo.DeleteExpiredData(ctx, now, RetentionPolicy{
+		CheckResults:     24 * time.Hour,
+		CheckJobs:        24 * time.Hour,
+		AlertOutbox:      24 * time.Hour,
+		ResolvedIncident: 24 * time.Hour,
+		BatchSize:        100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != (RetentionResult{CheckResults: 1, CheckJobs: 1, AlertOutbox: 1, ResolvedIncidents: 1}) {
+		t.Fatalf("retention result = %+v", result)
+	}
+
+	assertPostgresRecordExists(t, ctx, repo, "SELECT EXISTS (SELECT 1 FROM check_results WHERE id = $1)", "ret_result_old", false)
+	assertPostgresRecordExists(t, ctx, repo, "SELECT EXISTS (SELECT 1 FROM check_results WHERE id = $1)", "ret_result_fresh", true)
+	assertPostgresRecordExists(t, ctx, repo, "SELECT EXISTS (SELECT 1 FROM check_jobs WHERE id = $1)", "ret_job_old", false)
+	assertPostgresRecordExists(t, ctx, repo, "SELECT EXISTS (SELECT 1 FROM check_jobs WHERE id = $1)", "ret_job_fresh", true)
+	assertPostgresRecordExists(t, ctx, repo, "SELECT EXISTS (SELECT 1 FROM check_jobs WHERE id = $1)", "ret_job_active", true)
+	assertPostgresRecordExists(t, ctx, repo, "SELECT EXISTS (SELECT 1 FROM alert_outbox WHERE id = $1)", "ret_alert_old", false)
+	assertPostgresRecordExists(t, ctx, repo, "SELECT EXISTS (SELECT 1 FROM alert_outbox WHERE id = $1)", "ret_alert_active", true)
+	assertPostgresRecordExists(t, ctx, repo, "SELECT EXISTS (SELECT 1 FROM alert_outbox WHERE id = $1)", "ret_alert_fresh", true)
+	assertPostgresRecordExists(t, ctx, repo, "SELECT EXISTS (SELECT 1 FROM incidents WHERE id = $1)", "ret_incident_old", false)
+	assertPostgresRecordExists(t, ctx, repo, "SELECT EXISTS (SELECT 1 FROM incidents WHERE id = $1)", "ret_incident_active_outbox", true)
+	assertPostgresRecordExists(t, ctx, repo, "SELECT EXISTS (SELECT 1 FROM incidents WHERE id = $1)", "ret_incident_fresh", true)
+}
+
+func assertPostgresRecordExists(
+	t *testing.T,
+	ctx context.Context,
+	repo *PostgresMonitorRepository,
+	query string,
+	id string,
+	want bool,
+) {
+	t.Helper()
+	var exists bool
+	if err := repo.pool.QueryRow(ctx, query, id).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if exists != want {
+		t.Fatalf("record %s exists = %t, want %t", id, exists, want)
+	}
 }
 
 func processPostgresManualCheck(

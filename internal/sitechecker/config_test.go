@@ -51,10 +51,15 @@ var configEnvKeys = []string{
 	"ALERT_MAX_ATTEMPTS",
 	"ALERT_RETRY_INITIAL_BACKOFF",
 	"ALERT_RETRY_MAX_BACKOFF",
+	"RETENTION_ENABLED",
+	"RETENTION_INTERVAL",
+	"RETENTION_BATCH_SIZE",
+	"CHECK_RESULTS_RETENTION",
+	"CHECK_JOBS_RETENTION",
+	"ALERT_OUTBOX_RETENTION",
+	"RESOLVED_INCIDENT_RETENTION",
 	"USER_AGENT",
 	"ENABLE_PPROF",
-	"READINESS_STALE_AFTER",
-	"STARTUP_GRACE_PERIOD",
 }
 
 func cleanConfigEnv(t *testing.T) {
@@ -73,6 +78,7 @@ func cleanConfigEnv(t *testing.T) {
 		})
 	}
 	t.Setenv("API_KEY", "test-api-key-with-24-characters")
+	t.Setenv("APP_ENV", "local")
 }
 
 func TestLoadConfigDefaults(t *testing.T) {
@@ -89,8 +95,8 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.AppRole != "all" {
 		t.Fatalf("AppRole = %q, want all", cfg.AppRole)
 	}
-	if cfg.AppEnv != "production" {
-		t.Fatalf("AppEnv = %q, want production", cfg.AppEnv)
+	if cfg.AppEnv != "local" {
+		t.Fatalf("AppEnv = %q, want local", cfg.AppEnv)
 	}
 	if cfg.SeedDefaultLinks {
 		t.Fatal("SeedDefaultLinks = true, want false")
@@ -118,6 +124,17 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if cfg.AlertMaxAttempts != 8 {
 		t.Fatalf("AlertMaxAttempts = %d, want 8", cfg.AlertMaxAttempts)
+	}
+	if cfg.RetentionEnabled {
+		t.Fatal("RetentionEnabled = true, want false")
+	}
+	if cfg.RetentionInterval != time.Minute || cfg.RetentionBatchSize != 10000 {
+		t.Fatalf("retention schedule = interval:%s batch:%d", cfg.RetentionInterval, cfg.RetentionBatchSize)
+	}
+	if cfg.CheckResultsRetention != 90*24*time.Hour || cfg.CheckJobsRetention != 30*24*time.Hour ||
+		cfg.AlertOutboxRetention != 30*24*time.Hour || cfg.ResolvedIncidentRetention != 365*24*time.Hour {
+		t.Fatalf("retention defaults = results:%s jobs:%s outbox:%s incidents:%s",
+			cfg.CheckResultsRetention, cfg.CheckJobsRetention, cfg.AlertOutboxRetention, cfg.ResolvedIncidentRetention)
 	}
 	if _, ok := cfg.AllowedPorts[80]; !ok {
 		t.Fatalf("port 80 is not allowed by default")
@@ -147,6 +164,8 @@ func TestLoadConfigAllowsExplicitlyDisabledAuthenticationOnlyOutsideProduction(t
 	t.Setenv("APP_ROLE", "api")
 	t.Setenv("API_KEY", "")
 	t.Setenv("AUTH_DISABLED", "true")
+	t.Setenv("STORAGE_TYPE", "postgres")
+	t.Setenv("DATABASE_URL", "postgres://user:pass@example.com:5432/site_checker")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -176,10 +195,83 @@ func TestLoadConfigDoesNotRequireAPIKeyForWorkerRole(t *testing.T) {
 	cleanConfigEnv(t)
 	t.Setenv("APP_ROLE", "worker")
 	t.Setenv("API_KEY", "")
+	t.Setenv("STORAGE_TYPE", "postgres")
+	t.Setenv("DATABASE_URL", "postgres://user:pass@example.com:5432/site_checker")
+	t.Setenv("QUEUE_TYPE", "rabbitmq")
+	t.Setenv("RABBITMQ_URL", "amqp://user:pass@example.com:5672/")
 
 	if _, err := LoadConfig(); err != nil {
 		t.Fatalf("LoadConfig returned error for worker role: %v", err)
 	}
+}
+
+func TestLoadConfigRejectsUnsafeProductionAndSplitBackends(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+	}{
+		{
+			name: "production all with memory storage",
+			env:  map[string]string{"APP_ENV": "production", "APP_ROLE": "all"},
+		},
+		{
+			name: "split api with memory storage",
+			env:  map[string]string{"APP_ROLE": "api"},
+		},
+		{
+			name: "split scheduler with memory queue",
+			env: map[string]string{
+				"APP_ROLE":     "scheduler",
+				"STORAGE_TYPE": "postgres",
+				"DATABASE_URL": "postgres://user:pass@example.com:5432/site_checker",
+			},
+		},
+		{
+			name: "split worker with memory queue",
+			env: map[string]string{
+				"APP_ROLE":     "worker",
+				"STORAGE_TYPE": "postgres",
+				"DATABASE_URL": "postgres://user:pass@example.com:5432/site_checker",
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cleanConfigEnv(t)
+			for key, value := range test.env {
+				t.Setenv(key, value)
+			}
+			if _, err := LoadConfig(); err == nil {
+				t.Fatal("LoadConfig returned nil error for unsafe backend configuration")
+			}
+		})
+	}
+}
+
+func TestLoadConfigAllowsSupportedLocalAndProductionBackends(t *testing.T) {
+	t.Run("local all in memory", func(t *testing.T) {
+		cleanConfigEnv(t)
+		if _, err := LoadConfig(); err != nil {
+			t.Fatalf("LoadConfig returned error: %v", err)
+		}
+	})
+
+	t.Run("production split scheduler", func(t *testing.T) {
+		cleanConfigEnv(t)
+		t.Setenv("APP_ENV", "production")
+		t.Setenv("APP_ROLE", "scheduler")
+		t.Setenv("STORAGE_TYPE", "postgres")
+		t.Setenv("DATABASE_URL", "postgres://user:pass@example.com:5432/site_checker")
+		t.Setenv("QUEUE_TYPE", "rabbitmq")
+		t.Setenv("RABBITMQ_URL", "amqp://user:pass@example.com:5672/")
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig returned error: %v", err)
+		}
+		if cfg.AppEnv != "production" || cfg.StorageType != "postgres" || cfg.QueueType != "rabbitmq" {
+			t.Fatalf("config = env:%s storage:%s queue:%s", cfg.AppEnv, cfg.StorageType, cfg.QueueType)
+		}
+	})
 }
 
 func TestLoadConfigAcceptsAlertDispatcherRole(t *testing.T) {
@@ -220,6 +312,44 @@ func TestLoadConfigRequiresPostgresForAlerts(t *testing.T) {
 	if _, err := LoadConfig(); err == nil {
 		t.Fatal("LoadConfig returned nil error for alerts with in-memory storage")
 	}
+}
+
+func TestLoadConfigValidatesRetentionConfiguration(t *testing.T) {
+	t.Run("requires PostgreSQL", func(t *testing.T) {
+		cleanConfigEnv(t)
+		t.Setenv("RETENTION_ENABLED", "true")
+		if _, err := LoadConfig(); err == nil {
+			t.Fatal("LoadConfig returned nil error for retention with in-memory storage")
+		}
+	})
+
+	t.Run("requires scheduler owner", func(t *testing.T) {
+		cleanConfigEnv(t)
+		t.Setenv("APP_ROLE", "api")
+		t.Setenv("STORAGE_TYPE", "postgres")
+		t.Setenv("DATABASE_URL", "postgres://user:pass@example.com:5432/site_checker")
+		t.Setenv("RETENTION_ENABLED", "true")
+		if _, err := LoadConfig(); err == nil {
+			t.Fatal("LoadConfig returned nil error for retention in API role")
+		}
+	})
+
+	t.Run("accepts scheduler", func(t *testing.T) {
+		cleanConfigEnv(t)
+		t.Setenv("APP_ROLE", "scheduler")
+		t.Setenv("STORAGE_TYPE", "postgres")
+		t.Setenv("DATABASE_URL", "postgres://user:pass@example.com:5432/site_checker")
+		t.Setenv("QUEUE_TYPE", "rabbitmq")
+		t.Setenv("RABBITMQ_URL", "amqp://user:pass@example.com:5672/")
+		t.Setenv("RETENTION_ENABLED", "true")
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig returned error: %v", err)
+		}
+		if !cfg.RetentionEnabled {
+			t.Fatal("RetentionEnabled = false, want true")
+		}
+	})
 }
 
 func TestLoadConfigRejectsInvalidValues(t *testing.T) {

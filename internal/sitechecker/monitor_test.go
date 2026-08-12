@@ -50,6 +50,62 @@ func TestMonitorStoreClaimDueAvoidsDuplicates(t *testing.T) {
 	}
 }
 
+func TestMonitorStoreRejectsResultAfterCheckConfigurationChanges(t *testing.T) {
+	cfg := testCheckerConfig(t)
+	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}
+	store := NewMonitorStore(NewNetworkPolicy(cfg))
+
+	monitor, err := store.Create(MonitorInput{
+		URL:             "https://example.com",
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	jobs := store.ClaimDueJobs(1, now, time.Minute)
+	if len(jobs) != 1 {
+		t.Fatalf("claimed jobs = %d, want 1", len(jobs))
+	}
+	if err := store.MarkJobPublished(monitor.ID, jobs[0].ID, now); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := store.MarkJobProcessing(monitor.ID, jobs[0].ID, 1, now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newURL := "https://example.org"
+	updated, err := store.Update(monitor.ID, MonitorPatch{URL: &newURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.URL != newURL || updated.NextCheckAt.Before(now) {
+		t.Fatalf("updated monitor = %+v", updated)
+	}
+
+	_, err = store.AddCheck(CheckRecord{
+		ID:         "check_stale_configuration",
+		JobID:      jobs[0].ID,
+		MonitorID:  monitor.ID,
+		StatusCode: 500,
+		Success:    false,
+		CheckedAt:  time.Now().UTC(),
+	}, lease)
+	if !errors.Is(err, ErrStaleJob) {
+		t.Fatalf("AddCheck error = %v, want ErrStaleJob", err)
+	}
+	checks, total, err := store.ListChecks(monitor.ID, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 0 || len(checks) != 0 {
+		t.Fatalf("checks = %+v total=%d, want none", checks, total)
+	}
+}
+
 func TestMonitorStoreReclaimsStaleScheduledJob(t *testing.T) {
 	cfg := testCheckerConfig(t)
 	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}

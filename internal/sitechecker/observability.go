@@ -43,32 +43,11 @@ func NewObservabilityServerWithDependencies(addr string, cfg Config, metrics *Me
 			return
 		}
 
-		if cfg.AppRole != "" && cfg.AppRole != "all" {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"status": "ready",
-				"role":   cfg.AppRole,
-			})
-			return
+		response := map[string]any{"status": "ready"}
+		if cfg.AppRole != "" {
+			response["role"] = cfg.AppRole
 		}
-
-		snapshot := metrics.Snapshot()
-		now := time.Now()
-		if snapshot.LastCheckAt.IsZero() {
-			if now.Sub(snapshot.StartedAt) <= cfg.StartupGracePeriod {
-				writeJSON(w, http.StatusOK, map[string]any{"status": "warming_up"})
-				return
-			}
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "reason": "no checks completed"})
-			return
-		}
-		if now.Sub(snapshot.LastCheckAt) > cfg.ReadinessStaleAfter {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "reason": "checks are stale"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"status":        "ready",
-			"last_check_at": snapshot.LastCheckAt.UTC().Format(time.RFC3339),
-		})
+		writeJSON(w, http.StatusOK, response)
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")

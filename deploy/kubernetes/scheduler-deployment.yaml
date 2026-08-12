@@ -50,6 +50,8 @@ spec:
           env:
             - name: APP_ROLE
               value: scheduler
+            - name: RETENTION_ENABLED
+              value: "true"
           resources:
             requests:
               cpu: 50m
