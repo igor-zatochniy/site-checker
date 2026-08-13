@@ -122,7 +122,7 @@ func (p *NetworkPolicy) ValidateParsedURL(parsed *url.URL) error {
 }
 
 func (p *NetworkPolicy) CheckRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= p.maxRedirects {
+	if len(via) > p.maxRedirects {
 		return fmt.Errorf("stopped after %d redirects", p.maxRedirects)
 	}
 	if err := p.ValidateParsedURL(req.URL); err != nil {

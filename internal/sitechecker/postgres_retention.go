@@ -30,8 +30,8 @@ func (r *PostgresMonitorRepository) DeleteExpiredData(ctx context.Context, _ tim
 	result.CheckResults, err = deleteRetentionBatch(ctx, tx, `
 		WITH expired AS (
 			SELECT id FROM check_results
-			WHERE checked_at < $1
-			ORDER BY checked_at, id
+			WHERE recorded_at < $1
+			ORDER BY recorded_at, id
 			LIMIT $2
 			FOR UPDATE SKIP LOCKED
 		)

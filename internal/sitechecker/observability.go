@@ -57,6 +57,7 @@ func NewObservabilityServerWithDependencies(addr string, cfg Config, metrics *Me
 	return &http.Server{
 		Addr:              addr,
 		Handler:           mux,
+		ReadTimeout:       10 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,

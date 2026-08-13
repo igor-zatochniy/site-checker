@@ -176,8 +176,14 @@ func TestRabbitMQReconnectDelayIsBounded(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		if got := rabbitMQReconnectDelay(test.attempt, initial, maximum); got != test.want {
-			t.Errorf("attempt %d: delay = %s, want %s", test.attempt, got, test.want)
+		if base := rabbitMQReconnectBaseDelay(test.attempt, initial, maximum); base != test.want {
+			t.Errorf("attempt %d: base delay = %s, want %s", test.attempt, base, test.want)
+		}
+		for range 100 {
+			got := rabbitMQReconnectDelay(test.attempt, initial, maximum)
+			if got < test.want/2 || got > test.want {
+				t.Errorf("attempt %d: jittered delay = %s, want range [%s, %s]", test.attempt, got, test.want/2, test.want)
+			}
 		}
 	}
 }

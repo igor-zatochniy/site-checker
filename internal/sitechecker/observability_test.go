@@ -19,7 +19,11 @@ func TestObservabilityEndpoints(t *testing.T) {
 		ExpectedStatus: statusPolicy,
 	}
 	metrics := NewMetrics("test", "commit", "date", 1)
-	server := httptest.NewServer(NewObservabilityServer(":0", cfg, metrics).Handler)
+	observabilityServer := NewObservabilityServer(":0", cfg, metrics)
+	if observabilityServer.ReadTimeout <= 0 {
+		t.Fatal("HTTP server ReadTimeout is not configured")
+	}
+	server := httptest.NewServer(observabilityServer.Handler)
 	defer server.Close()
 
 	for _, path := range []string{"/healthz", "/readyz", "/metrics"} {

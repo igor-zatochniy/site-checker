@@ -742,15 +742,19 @@ func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRe
 		lease.JobID != record.JobID || lease.MonitorID != record.MonitorID {
 		return Monitor{}, ErrStaleJob
 	}
+	updatedAt, err := databaseTime(ctx, tx)
+	if err != nil {
+		return Monitor{}, err
+	}
 
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO check_results (
-			id, job_id, monitor_id, status_code, latency_ms, error, success, checked_at
+			id, job_id, monitor_id, status_code, latency_ms, error, success, checked_at, recorded_at
 		)
-		VALUES ($1, NULLIF($2, ''), $3, $4, $5, $6, $7, $8)
+		VALUES ($1, NULLIF($2, ''), $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (job_id) DO NOTHING
 	`, record.ID, record.JobID, record.MonitorID, record.StatusCode, record.LatencyMS,
-		record.Error, record.Success, record.CheckedAt.UTC())
+		record.Error, record.Success, record.CheckedAt.UTC(), updatedAt)
 	if err != nil {
 		return Monitor{}, err
 	}
@@ -758,26 +762,22 @@ func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRe
 		return Monitor{}, ErrDuplicateJob
 	}
 
-	updatedAt, err := databaseTime(ctx, tx)
-	if err != nil {
-		return Monitor{}, err
-	}
 	monitor, err := scanMonitor(tx.QueryRow(ctx, `
 		UPDATE monitors
 		SET last_status_code = $2,
 			last_latency_ms = $3,
-			last_checked_at = $4::timestamptz,
-			last_error = $5,
+			last_checked_at = $5::timestamptz,
+			last_error = $4,
 			next_check_at = CASE
-				WHEN $7 = 'scheduled' THEN $6::timestamptz + (interval_seconds * interval '1 second')
+				WHEN $6 = 'scheduled' THEN $5::timestamptz + (interval_seconds * interval '1 second')
 				ELSE next_check_at
 			END,
-			updated_at = $6::timestamptz
+			updated_at = $5::timestamptz
 		WHERE id = $1
 		RETURNING id, url, interval_seconds, timeout_seconds, expected_status,
 			status, enabled, next_check_at, created_at, updated_at,
 			last_status_code, last_latency_ms, last_checked_at, last_error
-	`, record.MonitorID, record.StatusCode, record.LatencyMS, record.CheckedAt.UTC(), record.Error, updatedAt, kind))
+	`, record.MonitorID, record.StatusCode, record.LatencyMS, record.Error, updatedAt, kind))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Monitor{}, ErrMonitorNotFound
 	}
@@ -830,7 +830,7 @@ func (r *PostgresMonitorRepository) ListChecks(ctx context.Context, id string, o
 		SELECT id, COALESCE(job_id, ''), monitor_id, status_code, latency_ms, error, success, checked_at
 		FROM check_results
 		WHERE monitor_id = $1
-		ORDER BY checked_at DESC, id DESC
+		ORDER BY recorded_at DESC, id DESC
 		OFFSET $2 LIMIT $3
 	`, id, offset, limit)
 	if err != nil {
@@ -868,29 +868,16 @@ func (r *PostgresMonitorRepository) Stats(ctx context.Context, id string) (Monit
 		stats.UptimePercent = float64(stats.SuccessfulChecks) / float64(stats.ChecksTotal) * 100
 	}
 
-	rows, err := r.pool.Query(ctx, `
-		SELECT success
-		FROM check_results
-		WHERE monitor_id = $1
-		ORDER BY checked_at DESC, id DESC
-		LIMIT 500
-	`, id)
-	if err != nil {
-		return MonitorStats{}, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var success bool
-		if err := rows.Scan(&success); err != nil {
-			return MonitorStats{}, err
-		}
-		if success {
-			break
-		}
-		stats.ConsecutiveFailure++
-	}
-	return stats, rows.Err()
+	err = r.pool.QueryRow(ctx, `
+		SELECT COALESCE((
+			SELECT failure_count
+			FROM incidents
+			WHERE monitor_id = $1
+				AND status = 'open'
+			LIMIT 1
+		), 0)
+	`, id).Scan(&stats.ConsecutiveFailure)
+	return stats, err
 }
 
 func (r *PostgresMonitorRepository) ListIncidents(ctx context.Context, status string, offset, limit int) ([]Incident, int, error) {

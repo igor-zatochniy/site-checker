@@ -153,12 +153,84 @@ func TestDispatchAlertBatchMarksExhaustedEventDead(t *testing.T) {
 	}
 }
 
+func TestDispatchAlertMarksPermanentClientErrorDead(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	repo := &recordingAlertOutboxRepository{events: []AlertOutboxEvent{{
+		ID:             "event-permanent",
+		IdempotencyKey: "incident-1:failure:1",
+		AttemptCount:   1,
+		LeaseToken:     "lease-permanent",
+	}}}
+	cfg := Config{
+		AlertDispatchBatchSize:   10,
+		AlertLeaseTimeout:        time.Minute,
+		AlertDeliveryTimeout:     time.Second,
+		AlertMaxAttempts:         8,
+		AlertRetryInitialBackoff: time.Second,
+		AlertRetryMaxBackoff:     time.Minute,
+	}
+	metrics := NewMetrics("test", "commit", "date", 0)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	if _, err := dispatchAlertBatch(t.Context(), repo, NewAlertSender(server.URL, "test", server.Client()), cfg, metrics, logger); err != nil {
+		t.Fatal(err)
+	}
+	if !repo.failedDead {
+		t.Fatal("permanent webhook response was not marked dead")
+	}
+}
+
+func TestDispatchAlertHonorsRetryAfter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "120")
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	repo := &recordingAlertOutboxRepository{events: []AlertOutboxEvent{{
+		ID:             "event-rate-limited",
+		IdempotencyKey: "incident-1:failure:2",
+		AttemptCount:   1,
+		LeaseToken:     "lease-rate-limited",
+	}}}
+	cfg := Config{
+		AlertDispatchBatchSize:   10,
+		AlertLeaseTimeout:        time.Minute,
+		AlertDeliveryTimeout:     time.Second,
+		AlertMaxAttempts:         8,
+		AlertRetryInitialBackoff: time.Second,
+		AlertRetryMaxBackoff:     time.Minute,
+	}
+	metrics := NewMetrics("test", "commit", "date", 0)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	if _, err := dispatchAlertBatch(t.Context(), repo, NewAlertSender(server.URL, "test", server.Client()), cfg, metrics, logger); err != nil {
+		t.Fatal(err)
+	}
+	if repo.failedDead {
+		t.Fatal("rate-limited webhook response was marked dead")
+	}
+	if repo.failedRetryDelay != 2*time.Minute {
+		t.Fatalf("retry delay = %s, want Retry-After 2m", repo.failedRetryDelay)
+	}
+}
+
 func TestAlertRetryDelayIsBounded(t *testing.T) {
 	if got := alertRetryDelay(1, time.Second, 10*time.Second); got != time.Second {
 		t.Fatalf("attempt 1 delay = %s, want 1s", got)
 	}
 	if got := alertRetryDelay(10, time.Second, 10*time.Second); got != 10*time.Second {
 		t.Fatalf("attempt 10 delay = %s, want 10s", got)
+	}
+}
+
+func TestParseRetryAfterIsBounded(t *testing.T) {
+	if got := parseRetryAfter("999999999999999999", time.Now()); got != maxAlertRetryAfter {
+		t.Fatalf("large Retry-After = %s, want %s", got, maxAlertRetryAfter)
 	}
 }
 

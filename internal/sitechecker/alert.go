@@ -9,13 +9,28 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
 var ErrStaleAlertLease = errors.New("alert outbox lease is no longer active")
 
-const alertEventIncidentFailure = "incident.failure"
+const (
+	alertEventIncidentFailure = "incident.failure"
+	maxAlertRetryAfter        = 24 * time.Hour
+)
+
+type AlertDeliveryError struct {
+	StatusCode int
+	Permanent  bool
+	RetryAfter time.Duration
+}
+
+func (e *AlertDeliveryError) Error() string {
+	return fmt.Sprintf("alert webhook returned status %d", e.StatusCode)
+}
 
 type AlertPolicy struct {
 	Enabled          bool
@@ -86,9 +101,50 @@ func (s *AlertSender) Send(ctx context.Context, event AlertOutboxEvent) error {
 	_, _ = io.CopyN(io.Discard, resp.Body, 4*1024)
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("alert webhook returned status %d", resp.StatusCode)
+		return &AlertDeliveryError{
+			StatusCode: resp.StatusCode,
+			Permanent:  isPermanentAlertStatus(resp.StatusCode),
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
+		}
 	}
 	return nil
+}
+
+func isPermanentAlertStatus(statusCode int) bool {
+	if statusCode < http.StatusBadRequest || statusCode >= http.StatusInternalServerError {
+		return false
+	}
+	switch statusCode {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+		return false
+	default:
+		return true
+	}
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		if seconds >= int64(maxAlertRetryAfter/time.Second) {
+			return maxAlertRetryAfter
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	retryAt, err := http.ParseTime(value)
+	if err != nil || !retryAt.After(now) {
+		return 0
+	}
+	delay := retryAt.Sub(now)
+	if delay > maxAlertRetryAfter {
+		return maxAlertRetryAfter
+	}
+	return delay
 }
 
 func RunAlertDispatcher(ctx context.Context, repo AlertOutboxRepository, sender *AlertSender, cfg Config, metrics *Metrics, logger *slog.Logger) {
@@ -156,8 +212,13 @@ func dispatchAlert(ctx context.Context, repo AlertOutboxRepository, sender *Aler
 	if ctx.Err() != nil {
 		return
 	}
-	dead := event.AttemptCount >= cfg.AlertMaxAttempts
+	var responseError *AlertDeliveryError
+	permanent := errors.As(deliveryErr, &responseError) && responseError.Permanent
+	dead := permanent || event.AttemptCount >= cfg.AlertMaxAttempts
 	retryDelay := alertRetryDelay(event.AttemptCount, cfg.AlertRetryInitialBackoff, cfg.AlertRetryMaxBackoff)
+	if responseError != nil && responseError.RetryAfter > retryDelay {
+		retryDelay = responseError.RetryAfter
+	}
 	if err := repo.MarkAlertFailed(ctx, event.ID, event.LeaseToken, deliveryErr.Error(), retryDelay, dead); err != nil {
 		if !errors.Is(err, ErrStaleAlertLease) {
 			logger.Warn("Failed to persist alert delivery failure", "event_id", event.ID, "error", err)

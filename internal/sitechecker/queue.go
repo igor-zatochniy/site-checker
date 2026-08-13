@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"sync"
 	"time"
@@ -760,6 +761,15 @@ func (q *RabbitMQQueue) Close() error {
 }
 
 func rabbitMQReconnectDelay(attempt int, initial, maximum time.Duration) time.Duration {
+	base := rabbitMQReconnectBaseDelay(attempt, initial, maximum)
+	if base <= time.Nanosecond {
+		return base
+	}
+	half := base / 2
+	return half + time.Duration(rand.Int64N(int64(base-half)+1))
+}
+
+func rabbitMQReconnectBaseDelay(attempt int, initial, maximum time.Duration) time.Duration {
 	if attempt < 1 {
 		attempt = 1
 	}

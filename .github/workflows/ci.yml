@@ -64,7 +64,7 @@ jobs:
   docker:
     name: Build container
     runs-on: ubuntu-latest
-    needs: test
+    needs: integration
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -105,20 +105,22 @@ jobs:
           image: site-checker:ci
           artifact-name: site-checker-sbom.spdx.json
 
-      - name: Push release image
+      - name: Push scanned release image
         id: release-image
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-            ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
-          build-args: |
-            VERSION=${{ github.ref_name }}
-            COMMIT=${{ github.sha }}
-            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+        env:
+          IMAGE_NAME: ghcr.io/${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker tag site-checker:ci "${IMAGE_NAME}:${RELEASE_TAG}"
+          docker tag site-checker:ci "${IMAGE_NAME}:sha-${COMMIT_SHA}"
+          docker push "${IMAGE_NAME}:${RELEASE_TAG}"
+          docker push "${IMAGE_NAME}:sha-${COMMIT_SHA}"
+          IMAGE_DIGEST="$(docker buildx imagetools inspect "${IMAGE_NAME}:${RELEASE_TAG}" --format '{{.Manifest.Digest}}')"
+          test -n "${IMAGE_DIGEST}"
+          printf 'digest=%s\n' "${IMAGE_DIGEST}" >> "${GITHUB_OUTPUT}"
 
       - name: Set up kubectl
         if: startsWith(github.ref, 'refs/tags/v')

@@ -357,7 +357,7 @@ Expected demonstration:
 | `ALERT_DELIVERY_TIMEOUT` | `5s` | Timeout for one webhook delivery attempt. |
 | `ALERT_MAX_ATTEMPTS` | `8` | Delivery attempts before an outbox event is marked `dead`. |
 | `ALERT_RETRY_INITIAL_BACKOFF` | `1s` | Initial persisted retry delay. |
-| `ALERT_RETRY_MAX_BACKOFF` | `5m` | Maximum persisted retry delay. |
+| `ALERT_RETRY_MAX_BACKOFF` | `5m` | Maximum exponential retry backoff. A valid webhook `Retry-After` response may extend the persisted delay up to 24 hours. |
 | `RETENTION_ENABLED` | `false` | Enables PostgreSQL history cleanup. Allowed only for `all` or `scheduler` roles and explicitly enabled by the supplied scheduler deployments. |
 | `RETENTION_INTERVAL` | `1m` | Delay between bounded cleanup passes. |
 | `RETENTION_BATCH_SIZE` | `10000` | Maximum rows deleted from each retained table in one pass. |
@@ -366,7 +366,7 @@ Expected demonstration:
 | `ALERT_OUTBOX_RETENTION` | `720h` | Retains delivered/dead alert events for 30 days. Pending/processing events are never deleted. |
 | `RESOLVED_INCIDENT_RETENTION` | `8760h` | Retains resolved incidents for 365 days and deletes them only after all related outbox rows are gone. |
 | `USER_AGENT` | `site-checker` | User-Agent used for checks. |
-| `ENABLE_PPROF` | `false` | Enables `/debug/pprof/` endpoints. |
+| `ENABLE_PPROF` | `false` | Enables `/debug/pprof/` endpoints outside production. `true` is rejected when `APP_ENV=production`. |
 
 ## URL File Example
 

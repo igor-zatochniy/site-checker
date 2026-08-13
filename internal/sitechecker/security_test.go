@@ -156,6 +156,33 @@ func TestCheckRedirectBlocksUnsafeTargets(t *testing.T) {
 	}
 }
 
+func TestCheckRedirectAllowsExactlyConfiguredRedirectCount(t *testing.T) {
+	target, err := url.Parse("https://example.com/next")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := &http.Request{URL: target}
+
+	policy := NewNetworkPolicy(Config{
+		MaxRedirects: 1,
+		AllowedPorts: map[int]struct{}{443: {}},
+	})
+	if err := policy.CheckRedirect(request, []*http.Request{{}}); err != nil {
+		t.Fatalf("first redirect was rejected: %v", err)
+	}
+	if err := policy.CheckRedirect(request, []*http.Request{{}, {}}); err == nil {
+		t.Fatal("second redirect was allowed with MAX_REDIRECTS=1")
+	}
+
+	policy = NewNetworkPolicy(Config{
+		MaxRedirects: 0,
+		AllowedPorts: map[int]struct{}{443: {}},
+	})
+	if err := policy.CheckRedirect(request, []*http.Request{{}}); err == nil {
+		t.Fatal("redirect was allowed with MAX_REDIRECTS=0")
+	}
+}
+
 func TestNetworkPolicyIPClassification(t *testing.T) {
 	policy := NewNetworkPolicy(Config{AllowedPorts: map[int]struct{}{80: {}, 443: {}}})
 

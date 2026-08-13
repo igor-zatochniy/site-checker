@@ -458,6 +458,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	verifyPostgresConfigurationUpdateInvalidatesActiveJob(t, ctx, repo)
 	verifyPostgresRetentionDeletesOnlyExpiredTerminalData(t, ctx, repo)
 	verifyPostgresUsesAuthoritativeLifecycleClock(t, ctx, repo)
+	verifyPostgresUsesRecordedTimeForHistoryAndRetention(t, ctx, repo)
 	verifyPostgresRecoversKilledWorkerLease(t, ctx, repo)
 	verifyPostgresAlertAttemptLimitIsAtomic(t, ctx, repo)
 	verifyPostgresRecoversAfterDatabaseInterruption(t, ctx, repo, postgresContainer)
@@ -531,8 +532,8 @@ func verifyPostgresUsesAuthoritativeLifecycleClock(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !updated.LastCheckedAt.Equal(observationTime.Truncate(time.Microsecond)) {
-		t.Fatalf("last_checked_at = %s, want informational observation %s", updated.LastCheckedAt, observationTime)
+	if updated.LastCheckedAt.Equal(observationTime.Truncate(time.Microsecond)) || updated.LastCheckedAt.Before(dbAfterProcessing) {
+		t.Fatalf("last_checked_at = %s, want PostgreSQL recording time after %s", updated.LastCheckedAt, dbAfterProcessing)
 	}
 	if want := updated.UpdatedAt.Add(time.Minute); !updated.NextCheckAt.Equal(want) {
 		t.Fatalf("next_check_at = %s, want PostgreSQL lifecycle time %s", updated.NextCheckAt, want)
@@ -572,6 +573,105 @@ func verifyPostgresUsesAuthoritativeLifecycleClock(
 	if firstFailureAt.Before(dbBeforeProcessing) || lastFailureAt.After(dbNow) {
 		t.Fatalf("incident lifecycle timestamps are outside PostgreSQL time window: first=%s last=%s db=[%s,%s]", firstFailureAt, lastFailureAt, dbBeforeProcessing, dbNow)
 	}
+}
+
+func verifyPostgresUsesRecordedTimeForHistoryAndRetention(
+	t *testing.T,
+	ctx context.Context,
+	repo *PostgresMonitorRepository,
+) {
+	t.Helper()
+	monitor, err := repo.Create(ctx, MonitorInput{
+		URL:             "https://recorded-order.example.com",
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbBefore, err := databaseTime(ctx, repo.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	futureObservation := dbBefore.Add(10 * time.Minute)
+	processPostgresManualCheck(t, ctx, repo, monitor.ID, CheckRecord{
+		ID:         "recorded_order_success",
+		MonitorID:  monitor.ID,
+		StatusCode: 200,
+		LatencyMS:  5,
+		Success:    true,
+		CheckedAt:  futureObservation,
+	}, AlertPolicy{})
+	failureObservation := dbBefore
+	updated := processPostgresManualCheck(t, ctx, repo, monitor.ID, CheckRecord{
+		ID:         "recorded_order_failure",
+		MonitorID:  monitor.ID,
+		StatusCode: 500,
+		LatencyMS:  5,
+		Error:      "unexpected status code 500",
+		Success:    false,
+		CheckedAt:  failureObservation,
+	}, AlertPolicy{})
+	dbAfter, err := databaseTime(ctx, repo.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checks, total, err := repo.ListChecks(ctx, monitor.ID, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || len(checks) != 2 || checks[0].ID != "recorded_order_failure" {
+		t.Fatalf("recorded-time history = %+v total=%d, want latest failure first", checks, total)
+	}
+	if !checks[0].CheckedAt.Equal(failureObservation.Truncate(time.Microsecond)) ||
+		!checks[1].CheckedAt.Equal(futureObservation.Truncate(time.Microsecond)) {
+		t.Fatalf("public observation timestamps changed: %+v", checks)
+	}
+	stats, err := repo.Stats(ctx, monitor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ConsecutiveFailure != 1 || stats.LastStatusCode != 500 {
+		t.Fatalf("stats after skewed observations = %+v, want one latest failure", stats)
+	}
+	if updated.LastCheckedAt.Before(dbBefore) || updated.LastCheckedAt.After(dbAfter) {
+		t.Fatalf("last_checked_at = %s, want PostgreSQL time in [%s, %s]", updated.LastCheckedAt, dbBefore, dbAfter)
+	}
+
+	retentionMonitor, err := repo.Create(ctx, MonitorInput{
+		URL:             "https://recorded-retention.example.com",
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldObservationID := "recorded_retention_fresh"
+	processPostgresManualCheck(t, ctx, repo, retentionMonitor.ID, CheckRecord{
+		ID:         oldObservationID,
+		MonitorID:  retentionMonitor.ID,
+		StatusCode: 200,
+		LatencyMS:  5,
+		Success:    true,
+		CheckedAt:  dbBefore.Add(-100 * 24 * time.Hour),
+	}, AlertPolicy{})
+	result, err := repo.DeleteExpiredData(ctx, time.Time{}, RetentionPolicy{
+		CheckResults:     90 * 24 * time.Hour,
+		CheckJobs:        10 * 365 * 24 * time.Hour,
+		AlertOutbox:      10 * 365 * 24 * time.Hour,
+		ResolvedIncident: 10 * 365 * 24 * time.Hour,
+		BatchSize:        100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CheckResults != 0 {
+		t.Fatalf("retention deleted %d fresh results with skewed observation time", result.CheckResults)
+	}
+	assertPostgresRecordExists(t, ctx, repo, "SELECT EXISTS (SELECT 1 FROM check_results WHERE id = $1)", oldObservationID, true)
 }
 
 func verifyPostgresAlertAttemptLimitIsAtomic(
@@ -865,11 +965,11 @@ func verifyPostgresRetentionDeletesOnlyExpiredTerminalData(
 	}
 	if _, err := repo.pool.Exec(ctx, `
 		INSERT INTO check_results (
-			id, job_id, monitor_id, status_code, latency_ms, error, success, checked_at
+			id, job_id, monitor_id, status_code, latency_ms, error, success, checked_at, recorded_at
 		)
 		VALUES
-			('ret_result_old', 'ret_job_old', $1, 200, 10, '', true, $2),
-			('ret_result_fresh', 'ret_job_fresh', $1, 200, 10, '', true, $3)
+			('ret_result_old', 'ret_job_old', $1, 200, 10, '', true, $2, $2),
+			('ret_result_fresh', 'ret_job_fresh', $1, 200, 10, '', true, $3, $3)
 	`, monitor.ID, old, now); err != nil {
 		t.Fatal(err)
 	}

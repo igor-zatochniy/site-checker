@@ -284,6 +284,19 @@ func TestLoadConfigAllowsSupportedLocalAndProductionBackends(t *testing.T) {
 	})
 }
 
+func TestLoadConfigRejectsPprofInProduction(t *testing.T) {
+	cleanConfigEnv(t)
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("APP_ROLE", "api")
+	t.Setenv("STORAGE_TYPE", "postgres")
+	t.Setenv("DATABASE_URL", "postgres://user:pass@example.com:5432/site_checker")
+	t.Setenv("ENABLE_PPROF", "true")
+
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("LoadConfig returned nil error for production pprof")
+	}
+}
+
 func TestLoadConfigAcceptsAlertDispatcherRole(t *testing.T) {
 	cleanConfigEnv(t)
 	t.Setenv("APP_ROLE", "alert-dispatcher")
