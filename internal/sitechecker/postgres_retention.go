@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func (r *PostgresMonitorRepository) DeleteExpiredData(ctx context.Context, now time.Time, policy RetentionPolicy) (RetentionResult, error) {
+func (r *PostgresMonitorRepository) DeleteExpiredData(ctx context.Context, _ time.Time, policy RetentionPolicy) (RetentionResult, error) {
 	if policy.BatchSize < 1 {
 		return RetentionResult{}, fmt.Errorf("retention batch size must be positive")
 	}
@@ -21,6 +21,10 @@ func (r *PostgresMonitorRepository) DeleteExpiredData(ctx context.Context, now t
 		return RetentionResult{}, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	now, err := databaseTime(ctx, tx)
+	if err != nil {
+		return RetentionResult{}, err
+	}
 
 	var result RetentionResult
 	result.CheckResults, err = deleteRetentionBatch(ctx, tx, `

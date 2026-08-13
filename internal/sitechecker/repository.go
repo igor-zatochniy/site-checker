@@ -14,13 +14,13 @@ type MonitorRepository interface {
 	Get(ctx context.Context, id string) (Monitor, error)
 	Update(ctx context.Context, id string, patch MonitorPatch) (Monitor, error)
 	Delete(ctx context.Context, id string) error
-	CreateManualJob(ctx context.Context, id string, now time.Time) (CheckJobRecord, bool, error)
-	ClaimDueJobs(ctx context.Context, limit int, now time.Time, leaseTimeout time.Duration, maxAttempts int) ([]CheckJobRecord, error)
-	MarkJobPublished(ctx context.Context, id, jobID string, now time.Time) error
-	ReleaseJobPublish(ctx context.Context, id, jobID, lastError string, now time.Time) error
-	MarkJobProcessing(ctx context.Context, id, jobID string, attempt int, now time.Time, leaseTimeout time.Duration) (ProcessingLease, error)
-	MarkJobFailed(ctx context.Context, lease ProcessingLease, lastError string, now, retryAt time.Time) error
-	MarkJobDead(ctx context.Context, lease ProcessingLease, lastError string, now, nextCheckAt time.Time) error
+	CreateManualJob(ctx context.Context, id string) (CheckJobRecord, bool, error)
+	ClaimDueJobs(ctx context.Context, limit int, leaseTimeout time.Duration, maxAttempts int) ([]CheckJobRecord, error)
+	MarkJobPublished(ctx context.Context, id, jobID string) error
+	ReleaseJobPublish(ctx context.Context, id, jobID, lastError string) error
+	MarkJobProcessing(ctx context.Context, id, jobID string, attempt int, leaseTimeout time.Duration) (ProcessingLease, error)
+	MarkJobFailed(ctx context.Context, lease ProcessingLease, lastError string, retryDelay time.Duration) error
+	MarkJobDead(ctx context.Context, lease ProcessingLease, lastError string) error
 	AddCheck(ctx context.Context, record CheckRecord, lease ProcessingLease, alertPolicy AlertPolicy) (Monitor, error)
 	ListChecks(ctx context.Context, id string, offset, limit int) ([]CheckRecord, int, error)
 	Stats(ctx context.Context, id string) (MonitorStats, error)
@@ -68,32 +68,38 @@ func (r *InMemoryMonitorRepository) Delete(_ context.Context, id string) error {
 	return r.store.Delete(id)
 }
 
-func (r *InMemoryMonitorRepository) CreateManualJob(_ context.Context, id string, now time.Time) (CheckJobRecord, bool, error) {
-	return r.store.CreateManualJob(id, now)
+func (r *InMemoryMonitorRepository) CreateManualJob(_ context.Context, id string) (CheckJobRecord, bool, error) {
+	return r.store.CreateManualJob(id, time.Now().UTC())
 }
 
-func (r *InMemoryMonitorRepository) ClaimDueJobs(_ context.Context, limit int, now time.Time, leaseTimeout time.Duration, maxAttempts int) ([]CheckJobRecord, error) {
-	return r.store.ClaimDueJobsWithMaxAttempts(limit, now, leaseTimeout, maxAttempts), nil
+func (r *InMemoryMonitorRepository) ClaimDueJobs(_ context.Context, limit int, leaseTimeout time.Duration, maxAttempts int) ([]CheckJobRecord, error) {
+	return r.store.ClaimDueJobsWithMaxAttempts(limit, time.Now().UTC(), leaseTimeout, maxAttempts), nil
 }
 
-func (r *InMemoryMonitorRepository) MarkJobPublished(_ context.Context, id, jobID string, now time.Time) error {
-	return r.store.MarkJobPublished(id, jobID, now)
+func (r *InMemoryMonitorRepository) MarkJobPublished(_ context.Context, id, jobID string) error {
+	return r.store.MarkJobPublished(id, jobID, time.Now().UTC())
 }
 
-func (r *InMemoryMonitorRepository) ReleaseJobPublish(_ context.Context, id, jobID, lastError string, now time.Time) error {
-	return r.store.ReleaseJobPublish(id, jobID, lastError, now)
+func (r *InMemoryMonitorRepository) ReleaseJobPublish(_ context.Context, id, jobID, lastError string) error {
+	return r.store.ReleaseJobPublish(id, jobID, lastError, time.Now().UTC())
 }
 
-func (r *InMemoryMonitorRepository) MarkJobProcessing(_ context.Context, id, jobID string, attempt int, now time.Time, leaseTimeout time.Duration) (ProcessingLease, error) {
-	return r.store.MarkJobProcessing(id, jobID, attempt, now, leaseTimeout)
+func (r *InMemoryMonitorRepository) MarkJobProcessing(_ context.Context, id, jobID string, attempt int, leaseTimeout time.Duration) (ProcessingLease, error) {
+	return r.store.MarkJobProcessing(id, jobID, attempt, time.Now().UTC(), leaseTimeout)
 }
 
-func (r *InMemoryMonitorRepository) MarkJobFailed(_ context.Context, lease ProcessingLease, lastError string, now, retryAt time.Time) error {
-	return r.store.MarkJobFailed(lease, lastError, now, retryAt)
+func (r *InMemoryMonitorRepository) MarkJobFailed(_ context.Context, lease ProcessingLease, lastError string, retryDelay time.Duration) error {
+	now := time.Now().UTC()
+	return r.store.MarkJobFailed(lease, lastError, now, now.Add(max(retryDelay, 0)))
 }
 
-func (r *InMemoryMonitorRepository) MarkJobDead(_ context.Context, lease ProcessingLease, lastError string, now, nextCheckAt time.Time) error {
-	return r.store.MarkJobDead(lease, lastError, now, nextCheckAt)
+func (r *InMemoryMonitorRepository) MarkJobDead(_ context.Context, lease ProcessingLease, lastError string) error {
+	monitor, err := r.store.Get(lease.MonitorID)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	return r.store.MarkJobDead(lease, lastError, now, now.Add(time.Duration(monitor.IntervalSeconds)*time.Second))
 }
 
 func (r *InMemoryMonitorRepository) AddCheck(_ context.Context, record CheckRecord, lease ProcessingLease, _ AlertPolicy) (Monitor, error) {

@@ -109,8 +109,11 @@ func TestDispatchAlertBatchPersistsRetry(t *testing.T) {
 	if repo.failedID != "event-1" || repo.failedLease != "lease-1" || repo.failedDead {
 		t.Fatalf("persisted failure = id:%q lease:%q dead:%v", repo.failedID, repo.failedLease, repo.failedDead)
 	}
-	if repo.failedAvailableAt.Before(time.Now().Add(500 * time.Millisecond)) {
-		t.Fatalf("retry available_at = %s, want future backoff", repo.failedAvailableAt)
+	if repo.failedRetryDelay != 2*time.Second {
+		t.Fatalf("retry delay = %s, want 2s", repo.failedRetryDelay)
+	}
+	if repo.claimedMaxAttempts != cfg.AlertMaxAttempts {
+		t.Fatalf("claimed max attempts = %d, want %d", repo.claimedMaxAttempts, cfg.AlertMaxAttempts)
 	}
 }
 
@@ -160,25 +163,27 @@ func TestAlertRetryDelayIsBounded(t *testing.T) {
 }
 
 type recordingAlertOutboxRepository struct {
-	events            []AlertOutboxEvent
-	failedID          string
-	failedLease       string
-	failedAvailableAt time.Time
-	failedDead        bool
+	events             []AlertOutboxEvent
+	failedID           string
+	failedLease        string
+	failedRetryDelay   time.Duration
+	failedDead         bool
+	claimedMaxAttempts int
 }
 
-func (r *recordingAlertOutboxRepository) ClaimAlerts(context.Context, int, time.Time, time.Duration) ([]AlertOutboxEvent, error) {
+func (r *recordingAlertOutboxRepository) ClaimAlerts(_ context.Context, _ int, _ time.Duration, maxAttempts int) ([]AlertOutboxEvent, error) {
+	r.claimedMaxAttempts = maxAttempts
 	return r.events, nil
 }
 
-func (r *recordingAlertOutboxRepository) MarkAlertDelivered(context.Context, string, string, time.Time) error {
+func (r *recordingAlertOutboxRepository) MarkAlertDelivered(context.Context, string, string) error {
 	return errors.New("unexpected delivery")
 }
 
-func (r *recordingAlertOutboxRepository) MarkAlertFailed(_ context.Context, id, leaseToken, _ string, availableAt time.Time, dead bool) error {
+func (r *recordingAlertOutboxRepository) MarkAlertFailed(_ context.Context, id, leaseToken, _ string, retryDelay time.Duration, dead bool) error {
 	r.failedID = id
 	r.failedLease = leaseToken
-	r.failedAvailableAt = availableAt
+	r.failedRetryDelay = retryDelay
 	r.failedDead = dead
 	return nil
 }

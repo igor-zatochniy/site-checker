@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/moby/moby/client"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 )
@@ -57,8 +58,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	now := time.Now().UTC()
-	claimed, err := repo.ClaimDueJobs(ctx, 10, now, time.Minute, defaultMaxJobAttempts)
+	claimed, err := repo.ClaimDueJobs(ctx, 10, time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,67 +69,70 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if claimed[0].Status != checkJobStatusScheduled || claimed[0].Attempt != 0 {
 		t.Fatalf("initial check job = %+v, want scheduled attempt 0", claimed[0])
 	}
-	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID, now.Add(5*time.Second)); err != nil {
+	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID); err != nil {
 		t.Fatal(err)
 	}
-	staleLease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 1, now.Add(10*time.Second), time.Minute)
+	staleLease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 1, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	secondClaim, err := repo.ClaimDueJobs(ctx, 10, now.Add(30*time.Second), time.Minute, defaultMaxJobAttempts)
+	secondClaim, err := repo.ClaimDueJobs(ctx, 10, time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(secondClaim) != 0 {
 		t.Fatalf("second claim len = %d, want 0 before lease timeout", len(secondClaim))
 	}
-	if _, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 1, now.Add(30*time.Second), time.Minute); !errors.Is(err, ErrJobAlreadyProcessing) {
+	if _, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 1, time.Minute); !errors.Is(err, ErrJobAlreadyProcessing) {
 		t.Fatalf("second MarkJobProcessing error = %v, want ErrJobAlreadyProcessing", err)
 	}
 
-	reclaimed, err := repo.ClaimDueJobs(ctx, 10, now.Add(2*time.Minute), time.Minute, defaultMaxJobAttempts)
+	if _, err := pool.Exec(ctx, `UPDATE check_jobs SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := repo.ClaimDueJobs(ctx, 10, time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(reclaimed) != 1 || reclaimed[0].ID != jobID || reclaimed[0].Status != checkJobStatusScheduled || reclaimed[0].Attempt != 1 {
 		t.Fatalf("reclaimed = %+v, want persisted stale job", reclaimed)
 	}
-	if _, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 1, now.Add(2*time.Minute+time.Second), time.Minute); !errors.Is(err, ErrStaleJob) {
+	if _, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 1, time.Minute); !errors.Is(err, ErrStaleJob) {
 		t.Fatalf("old delivery error = %v, want ErrStaleJob", err)
 	}
-	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID, now.Add(2*time.Minute+time.Second)); err != nil {
+	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID); err != nil {
 		t.Fatal(err)
 	}
-	retryLease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 2, now.Add(2*time.Minute+2*time.Second), time.Minute)
+	retryLease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 2, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.MarkJobFailed(ctx, staleLease, "stale worker failure", now, now); !errors.Is(err, ErrStaleJob) {
+	if err := repo.MarkJobFailed(ctx, staleLease, "stale worker failure", 0); !errors.Is(err, ErrStaleJob) {
 		t.Fatalf("stale worker MarkJobFailed error = %v, want ErrStaleJob", err)
 	}
-	jobRetryAt := now.Add(2*time.Minute + 10*time.Second)
-	if err := repo.MarkJobFailed(ctx, retryLease, "temporary storage failure", now.Add(2*time.Minute+3*time.Second), jobRetryAt); err != nil {
+	if err := repo.MarkJobFailed(ctx, retryLease, "temporary storage failure", 100*time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
-	beforeRetry, err := repo.ClaimDueJobs(ctx, 10, jobRetryAt.Add(-time.Millisecond), time.Minute, defaultMaxJobAttempts)
+	beforeRetry, err := repo.ClaimDueJobs(ctx, 10, time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(beforeRetry) != 0 {
 		t.Fatalf("jobs before retry = %+v, want none", beforeRetry)
 	}
-	retryJobs, err := repo.ClaimDueJobs(ctx, 10, jobRetryAt, time.Minute, defaultMaxJobAttempts)
+	time.Sleep(150 * time.Millisecond)
+	retryJobs, err := repo.ClaimDueJobs(ctx, 10, time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(retryJobs) != 1 || retryJobs[0].ID != jobID || retryJobs[0].Attempt != 2 {
 		t.Fatalf("retry jobs = %+v, want attempt 2 job", retryJobs)
 	}
-	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID, jobRetryAt.Add(time.Second)); err != nil {
+	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID); err != nil {
 		t.Fatal(err)
 	}
-	finalLease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 3, jobRetryAt.Add(2*time.Second), time.Minute)
+	finalLease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 3, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,8 +162,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 		t.Fatalf("duplicate AddCheck error = %v, want ErrDuplicateJob", err)
 	}
 
-	alertNow := time.Now().UTC()
-	events, err := repo.ClaimAlerts(ctx, 10, alertNow, time.Minute)
+	events, err := repo.ClaimAlerts(ctx, 10, time.Minute, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,36 +173,39 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if event.AttemptCount != 1 || event.Payload.IncidentID == "" || event.Payload.ConsecutiveFailures != 1 {
 		t.Fatalf("alert event = %+v, want first incident failure", event)
 	}
-	events, err = repo.ClaimAlerts(ctx, 10, alertNow.Add(2*time.Minute), time.Minute)
+	if _, err := pool.Exec(ctx, `UPDATE alert_outbox SET locked_until = clock_timestamp() - interval '1 second' WHERE id = $1`, event.ID); err != nil {
+		t.Fatal(err)
+	}
+	events, err = repo.ClaimAlerts(ctx, 10, time.Minute, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(events) != 1 || events[0].AttemptCount != 2 {
 		t.Fatalf("reclaimed alerts = %+v, want stale lease attempt 2", events)
 	}
-	if err := repo.MarkAlertDelivered(ctx, event.ID, event.LeaseToken, alertNow); !errors.Is(err, ErrStaleAlertLease) {
+	if err := repo.MarkAlertDelivered(ctx, event.ID, event.LeaseToken); !errors.Is(err, ErrStaleAlertLease) {
 		t.Fatalf("expired lease delivery error = %v, want ErrStaleAlertLease", err)
 	}
 	event = events[0]
-	retryAt := alertNow.Add(3 * time.Minute)
-	if err := repo.MarkAlertFailed(ctx, event.ID, event.LeaseToken, "temporary failure", retryAt, false); err != nil {
+	if err := repo.MarkAlertFailed(ctx, event.ID, event.LeaseToken, "temporary failure", 100*time.Millisecond, false); err != nil {
 		t.Fatal(err)
 	}
-	events, err = repo.ClaimAlerts(ctx, 10, alertNow.Add(150*time.Second), time.Minute)
+	events, err = repo.ClaimAlerts(ctx, 10, time.Minute, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(events) != 0 {
 		t.Fatalf("alerts before retry = %d, want 0", len(events))
 	}
-	events, err = repo.ClaimAlerts(ctx, 10, retryAt.Add(time.Second), time.Minute)
+	time.Sleep(150 * time.Millisecond)
+	events, err = repo.ClaimAlerts(ctx, 10, time.Minute, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(events) != 1 || events[0].AttemptCount != 3 {
 		t.Fatalf("retried alerts = %+v, want attempt 3", events)
 	}
-	if err := repo.MarkAlertDelivered(ctx, events[0].ID, events[0].LeaseToken, retryAt.Add(time.Second)); err != nil {
+	if err := repo.MarkAlertDelivered(ctx, events[0].ID, events[0].LeaseToken); err != nil {
 		t.Fatal(err)
 	}
 
@@ -223,7 +228,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	record.ID = newID("chk")
 	record.CheckedAt = time.Now().UTC()
 	processPostgresManualCheck(t, ctx, repo, monitor.ID, record, alertPolicy)
-	events, err = repo.ClaimAlerts(ctx, 10, time.Now().UTC(), time.Minute)
+	events, err = repo.ClaimAlerts(ctx, 10, time.Minute, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +281,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 		t.Fatalf("manual check moved next_check_at to %s, want %s", manualUpdated.NextCheckAt, manualLeaseMonitor.NextCheckAt)
 	}
 
-	manualClaimed, err := repo.ClaimDueJobs(ctx, 10, manualNow.Add(30*time.Second), time.Minute, defaultMaxJobAttempts)
+	manualClaimed, err := repo.ClaimDueJobs(ctx, 10, time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,10 +289,10 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if manualScheduledJobID == "" {
 		t.Fatalf("manual monitor periodic job was not claimed: %+v", manualClaimed)
 	}
-	if err := repo.MarkJobPublished(ctx, manualLeaseMonitor.ID, manualScheduledJobID, manualNow.Add(31*time.Second)); err != nil {
+	if err := repo.MarkJobPublished(ctx, manualLeaseMonitor.ID, manualScheduledJobID); err != nil {
 		t.Fatal(err)
 	}
-	manualScheduledLease, err := repo.MarkJobProcessing(ctx, manualLeaseMonitor.ID, manualScheduledJobID, 1, manualNow.Add(32*time.Second), time.Minute)
+	manualScheduledLease, err := repo.MarkJobProcessing(ctx, manualLeaseMonitor.ID, manualScheduledJobID, 1, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,8 +325,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	failNow := time.Now().UTC()
-	failClaimed, err := repo.ClaimDueJobs(ctx, 10, failNow, time.Minute, defaultMaxJobAttempts)
+	failClaimed, err := repo.ClaimDueJobs(ctx, 10, time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,28 +341,31 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if !foundFailProcessingMonitor {
 		t.Fatalf("fail-processing monitor was not claimed: %+v", failClaimed)
 	}
-	if err := repo.MarkJobPublished(ctx, failProcessingMonitor.ID, failJobID, failNow.Add(5*time.Second)); err != nil {
+	if err := repo.MarkJobPublished(ctx, failProcessingMonitor.ID, failJobID); err != nil {
 		t.Fatal(err)
 	}
-	failLease, err := repo.MarkJobProcessing(ctx, failProcessingMonitor.ID, failJobID, 1, failNow.Add(10*time.Second), time.Minute)
+	failLease, err := repo.MarkJobProcessing(ctx, failProcessingMonitor.ID, failJobID, 1, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	updatedAt := failNow.Add(20 * time.Second)
-	nextCheckAt := updatedAt.Add(5 * time.Minute)
-	if err := repo.MarkJobDead(ctx, failLease, "result persistence failed", updatedAt, nextCheckAt); err != nil {
+	dbBeforeDead, err := databaseTime(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.MarkJobDead(ctx, failLease, "result persistence failed"); err != nil {
 		t.Fatal(err)
 	}
 	afterFailProcessing, err := repo.Get(ctx, failProcessingMonitor.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !afterFailProcessing.UpdatedAt.Equal(updatedAt.Truncate(time.Microsecond)) {
-		t.Fatalf("updated_at = %s, want %s", afterFailProcessing.UpdatedAt, updatedAt)
+	if afterFailProcessing.UpdatedAt.Before(dbBeforeDead) || afterFailProcessing.UpdatedAt.After(time.Now().UTC().Add(time.Second)) {
+		t.Fatalf("updated_at = %s, want database current time after %s", afterFailProcessing.UpdatedAt, dbBeforeDead)
 	}
-	if !afterFailProcessing.NextCheckAt.Equal(nextCheckAt.Truncate(time.Microsecond)) {
-		t.Fatalf("next_check_at = %s, want %s", afterFailProcessing.NextCheckAt, nextCheckAt)
+	wantNextCheckAt := afterFailProcessing.UpdatedAt.Add(5 * time.Minute)
+	if !afterFailProcessing.NextCheckAt.Equal(wantNextCheckAt) {
+		t.Fatalf("next_check_at = %s, want %s", afterFailProcessing.NextCheckAt, wantNextCheckAt)
 	}
 	deadJob, err := repo.GetCheckJob(ctx, failJobID)
 	if err != nil {
@@ -377,8 +384,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptNow := time.Now().UTC()
-	attemptJobs, err := repo.ClaimDueJobs(ctx, 100, attemptNow, time.Minute, 3)
+	attemptJobs, err := repo.ClaimDueJobs(ctx, 100, time.Minute, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,15 +392,17 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if attemptJobID == "" {
 		t.Fatalf("attempt-limit monitor was not claimed: %+v", attemptJobs)
 	}
-	if err := repo.MarkJobPublished(ctx, attemptLimitMonitor.ID, attemptJobID, attemptNow); err != nil {
+	if err := repo.MarkJobPublished(ctx, attemptLimitMonitor.ID, attemptJobID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.MarkJobProcessing(ctx, attemptLimitMonitor.ID, attemptJobID, 3, attemptNow, time.Minute); err != nil {
+	if _, err := repo.MarkJobProcessing(ctx, attemptLimitMonitor.ID, attemptJobID, 3, time.Minute); err != nil {
 		t.Fatal(err)
 	}
 
-	recoveredAt := attemptNow.Add(2 * time.Minute)
-	recoveredJobs, err := repo.ClaimDueJobs(ctx, 100, recoveredAt, time.Minute, 3)
+	if _, err := pool.Exec(ctx, `UPDATE check_jobs SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1`, attemptJobID); err != nil {
+		t.Fatal(err)
+	}
+	recoveredJobs, err := repo.ClaimDueJobs(ctx, 100, time.Minute, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,11 +432,14 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantNextCheckAt := recoveredAt.Add(time.Minute)
-	if !updatedAttemptMonitor.NextCheckAt.Equal(wantNextCheckAt.Truncate(time.Microsecond)) {
-		t.Fatalf("next_check_at = %s, want %s", updatedAttemptMonitor.NextCheckAt, wantNextCheckAt)
+	wantAttemptNextCheckAt := updatedAttemptMonitor.UpdatedAt.Add(time.Minute)
+	if !updatedAttemptMonitor.NextCheckAt.Equal(wantAttemptNextCheckAt) {
+		t.Fatalf("next_check_at = %s, want %s", updatedAttemptMonitor.NextCheckAt, wantAttemptNextCheckAt)
 	}
-	nextPeriodicJobs, err := repo.ClaimDueJobs(ctx, 100, wantNextCheckAt, time.Minute, 3)
+	if _, err := pool.Exec(ctx, `UPDATE monitors SET next_check_at = clock_timestamp() - interval '1 second' WHERE id = $1`, attemptLimitMonitor.ID); err != nil {
+		t.Fatal(err)
+	}
+	nextPeriodicJobs, err := repo.ClaimDueJobs(ctx, 100, time.Minute, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,6 +457,303 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 
 	verifyPostgresConfigurationUpdateInvalidatesActiveJob(t, ctx, repo)
 	verifyPostgresRetentionDeletesOnlyExpiredTerminalData(t, ctx, repo)
+	verifyPostgresUsesAuthoritativeLifecycleClock(t, ctx, repo)
+	verifyPostgresRecoversKilledWorkerLease(t, ctx, repo)
+	verifyPostgresAlertAttemptLimitIsAtomic(t, ctx, repo)
+	verifyPostgresRecoversAfterDatabaseInterruption(t, ctx, repo, postgresContainer)
+}
+
+func verifyPostgresUsesAuthoritativeLifecycleClock(
+	t *testing.T,
+	ctx context.Context,
+	repo *PostgresMonitorRepository,
+) {
+	t.Helper()
+	monitor, err := repo.Create(ctx, MonitorInput{
+		URL:             "https://database-clock.example.com",
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := repo.ClaimDueJobs(ctx, 100, 90*time.Second, defaultMaxJobAttempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID := findClaimedJobID(jobs, monitor.ID)
+	if jobID == "" {
+		t.Fatalf("database-clock monitor was not claimed: %+v", jobs)
+	}
+	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID); err != nil {
+		t.Fatal(err)
+	}
+	dbBeforeProcessing, err := databaseTime(ctx, repo.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 1, 90*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbAfterProcessing, err := databaseTime(ctx, repo.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := repo.GetCheckJob(ctx, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ProcessingStartedAt.Before(dbBeforeProcessing) || job.ProcessingStartedAt.After(dbAfterProcessing) {
+		t.Fatalf("processing_started_at = %s, want PostgreSQL time in [%s, %s]", job.ProcessingStartedAt, dbBeforeProcessing, dbAfterProcessing)
+	}
+	if got := job.LeaseExpiresAt.Sub(job.ProcessingStartedAt); got != 90*time.Second {
+		t.Fatalf("processing lease duration = %s, want 90s", got)
+	}
+	if reclaimed, err := repo.ClaimDueJobs(ctx, 100, 90*time.Second, defaultMaxJobAttempts); err != nil {
+		t.Fatal(err)
+	} else if reclaimedID := findClaimedJobID(reclaimed, monitor.ID); reclaimedID != "" {
+		t.Fatalf("live database-clock lease was reclaimed as %s", reclaimedID)
+	}
+
+	observationTime := time.Now().UTC().Add(-time.Hour)
+	updated, err := repo.AddCheck(ctx, CheckRecord{
+		ID:         newID("chk"),
+		JobID:      jobID,
+		MonitorID:  monitor.ID,
+		StatusCode: 500,
+		LatencyMS:  5,
+		Error:      "unexpected status code 500",
+		Success:    false,
+		CheckedAt:  observationTime,
+	}, lease, AlertPolicy{Enabled: true, FailureThreshold: 1, Cooldown: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.LastCheckedAt.Equal(observationTime.Truncate(time.Microsecond)) {
+		t.Fatalf("last_checked_at = %s, want informational observation %s", updated.LastCheckedAt, observationTime)
+	}
+	if want := updated.UpdatedAt.Add(time.Minute); !updated.NextCheckAt.Equal(want) {
+		t.Fatalf("next_check_at = %s, want PostgreSQL lifecycle time %s", updated.NextCheckAt, want)
+	}
+	if updated.NextCheckAt.Before(time.Now().UTC().Add(30 * time.Second)) {
+		t.Fatalf("skewed checked_at moved next_check_at into the past: %s", updated.NextCheckAt)
+	}
+
+	processPostgresManualCheck(t, ctx, repo, monitor.ID, CheckRecord{
+		ID:         newID("chk"),
+		MonitorID:  monitor.ID,
+		StatusCode: 500,
+		LatencyMS:  5,
+		Error:      "unexpected status code 500",
+		Success:    false,
+		CheckedAt:  time.Now().UTC().Add(time.Hour),
+	}, AlertPolicy{Enabled: true, FailureThreshold: 1, Cooldown: time.Hour})
+	var alertCount int
+	if err := repo.pool.QueryRow(ctx, `SELECT count(*) FROM alert_outbox WHERE monitor_id = $1`, monitor.ID).Scan(&alertCount); err != nil {
+		t.Fatal(err)
+	}
+	if alertCount != 1 {
+		t.Fatalf("alert outbox rows under skewed observation times = %d, want cooldown to keep 1", alertCount)
+	}
+	var firstFailureAt, lastFailureAt time.Time
+	if err := repo.pool.QueryRow(ctx, `
+		SELECT first_failure_at, last_failure_at
+		FROM incidents
+		WHERE monitor_id = $1 AND status = 'open'
+	`, monitor.ID).Scan(&firstFailureAt, &lastFailureAt); err != nil {
+		t.Fatal(err)
+	}
+	dbNow, err := databaseTime(ctx, repo.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstFailureAt.Before(dbBeforeProcessing) || lastFailureAt.After(dbNow) {
+		t.Fatalf("incident lifecycle timestamps are outside PostgreSQL time window: first=%s last=%s db=[%s,%s]", firstFailureAt, lastFailureAt, dbBeforeProcessing, dbNow)
+	}
+}
+
+func verifyPostgresAlertAttemptLimitIsAtomic(
+	t *testing.T,
+	ctx context.Context,
+	repo *PostgresMonitorRepository,
+) {
+	t.Helper()
+	var eventID string
+	if err := repo.pool.QueryRow(ctx, `
+		SELECT id
+		FROM alert_outbox
+		WHERE status = 'pending'
+		ORDER BY created_at DESC
+		LIMIT 1
+	`).Scan(&eventID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.pool.Exec(ctx, `
+		UPDATE alert_outbox
+		SET status = 'processing',
+			attempt_count = 1,
+			lease_token = 'expired-max-attempt',
+			locked_until = clock_timestamp() - interval '1 second'
+		WHERE id = $1
+	`, eventID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.pool.Exec(ctx, `
+		UPDATE alert_outbox
+		SET available_at = clock_timestamp() + interval '1 hour'
+		WHERE id <> $1 AND status = 'pending'
+	`, eventID); err != nil {
+		t.Fatal(err)
+	}
+	events, err := repo.ClaimAlerts(ctx, 100, time.Minute, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("claimed alerts after exhausted lease recovery = %+v, want none", events)
+	}
+	var status string
+	var attempts int
+	var leaseCleared bool
+	if err := repo.pool.QueryRow(ctx, `
+		SELECT status, attempt_count, lease_token IS NULL
+		FROM alert_outbox
+		WHERE id = $1
+	`, eventID).Scan(&status, &attempts, &leaseCleared); err != nil {
+		t.Fatal(err)
+	}
+	if status != "dead" || attempts != 1 || !leaseCleared {
+		t.Fatalf("exhausted alert = status:%s attempts:%d lease_cleared:%t, want dead/1/true", status, attempts, leaseCleared)
+	}
+}
+
+func verifyPostgresRecoversKilledWorkerLease(
+	t *testing.T,
+	ctx context.Context,
+	repo *PostgresMonitorRepository,
+) {
+	t.Helper()
+	monitor, err := repo.Create(ctx, MonitorInput{
+		URL:             "https://killed-worker.example.com",
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := repo.ClaimDueJobs(ctx, 100, time.Minute, defaultMaxJobAttempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID := findClaimedJobID(jobs, monitor.ID)
+	if jobID == "" {
+		t.Fatalf("killed-worker monitor was not claimed: %+v", jobs)
+	}
+	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID); err != nil {
+		t.Fatal(err)
+	}
+	firstLease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 1, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.pool.Exec(ctx, `
+		UPDATE check_jobs
+		SET lease_expires_at = clock_timestamp() - interval '1 second'
+		WHERE id = $1 AND lease_token = $2
+	`, jobID, firstLease.LeaseToken); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := repo.ClaimDueJobs(ctx, 100, time.Minute, defaultMaxJobAttempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recoveredID := findClaimedJobID(recovered, monitor.ID); recoveredID != jobID {
+		t.Fatalf("recovered worker job = %q, want %q", recoveredID, jobID)
+	}
+	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID); err != nil {
+		t.Fatal(err)
+	}
+	secondLease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 2, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondLease.LeaseToken == firstLease.LeaseToken {
+		t.Fatal("recovered worker reused stale fencing token")
+	}
+	if _, err := repo.AddCheck(ctx, CheckRecord{
+		ID:         newID("chk"),
+		JobID:      jobID,
+		MonitorID:  monitor.ID,
+		StatusCode: 200,
+		LatencyMS:  5,
+		Success:    true,
+		CheckedAt:  time.Now().UTC(),
+	}, secondLease, AlertPolicy{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.MarkJobFailed(ctx, firstLease, "late killed worker", 0); !errors.Is(err, ErrStaleJob) {
+		t.Fatalf("stale killed worker transition error = %v, want ErrStaleJob", err)
+	}
+	var resultCount int
+	if err := repo.pool.QueryRow(ctx, `SELECT count(*) FROM check_results WHERE job_id = $1`, jobID).Scan(&resultCount); err != nil {
+		t.Fatal(err)
+	}
+	if resultCount != 1 {
+		t.Fatalf("results after worker recovery = %d, want 1", resultCount)
+	}
+}
+
+func verifyPostgresRecoversAfterDatabaseInterruption(
+	t *testing.T,
+	ctx context.Context,
+	repo *PostgresMonitorRepository,
+	container testcontainers.Container,
+) {
+	t.Helper()
+	before, err := repo.Count(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := testcontainers.NewDockerProvider()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close()
+	if _, err := provider.Client().ContainerPause(ctx, container.GetContainerID(), client.ContainerPauseOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
+	pingErr := repo.Ping(pingCtx)
+	pingCancel()
+	if pingErr == nil {
+		t.Fatal("PostgreSQL ping succeeded while database container was paused")
+	}
+	if _, err := provider.Client().ContainerUnpause(ctx, container.GetContainerID(), client.ContainerUnpauseOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		pingCtx, pingCancel = context.WithTimeout(ctx, time.Second)
+		err = repo.Ping(pingCtx)
+		pingCancel()
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("PostgreSQL did not recover after interruption: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	after, err := repo.Count(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("monitor count after PostgreSQL interruption = %d, want %d", after, before)
+	}
 }
 
 func verifyPostgresConfigurationUpdateInvalidatesActiveJob(
@@ -463,8 +771,7 @@ func verifyPostgresConfigurationUpdateInvalidatesActiveJob(
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC()
-	jobs, err := repo.ClaimDueJobs(ctx, 100, now, time.Minute, defaultMaxJobAttempts)
+	jobs, err := repo.ClaimDueJobs(ctx, 100, time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,10 +779,10 @@ func verifyPostgresConfigurationUpdateInvalidatesActiveJob(
 	if jobID == "" {
 		t.Fatalf("no job claimed for monitor %s", monitor.ID)
 	}
-	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID, now); err != nil {
+	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 1, now, time.Minute)
+	lease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 1, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -648,18 +955,17 @@ func processPostgresManualCheck(
 	alertPolicy AlertPolicy,
 ) Monitor {
 	t.Helper()
-	now := record.CheckedAt.Add(-time.Second)
-	job, created, err := repo.CreateManualJob(ctx, monitorID, now)
+	job, created, err := repo.CreateManualJob(ctx, monitorID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !created || job.Kind != checkJobKindManual {
 		t.Fatalf("manual job = %+v created=%t", job, created)
 	}
-	if err := repo.MarkJobPublished(ctx, monitorID, job.ID, now); err != nil {
+	if err := repo.MarkJobPublished(ctx, monitorID, job.ID); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := repo.MarkJobProcessing(ctx, monitorID, job.ID, 1, now, time.Minute)
+	lease, err := repo.MarkJobProcessing(ctx, monitorID, job.ID, 1, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}

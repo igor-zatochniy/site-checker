@@ -38,7 +38,6 @@ func (r *PostgresMonitorRepository) Create(ctx context.Context, input MonitorInp
 		return Monitor{}, err
 	}
 
-	now := time.Now().UTC()
 	enabled := true
 	if input.Enabled != nil {
 		enabled = *input.Enabled
@@ -56,22 +55,23 @@ func (r *PostgresMonitorRepository) Create(ctx context.Context, input MonitorInp
 		ExpectedStatus:  input.ExpectedStatus,
 		Status:          status,
 		Enabled:         enabled,
-		NextCheckAt:     now,
-		CreatedAt:       now,
-		UpdatedAt:       now,
 	}
 
 	row := r.pool.QueryRow(ctx, `
+		WITH db_clock AS MATERIALIZED (
+			SELECT clock_timestamp() AS now
+		)
 		INSERT INTO monitors (
 			id, url, interval_seconds, timeout_seconds, expected_status,
 			status, enabled, next_check_at, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		SELECT $1, $2, $3, $4, $5, $6, $7, db_clock.now, db_clock.now, db_clock.now
+		FROM db_clock
 		RETURNING id, url, interval_seconds, timeout_seconds, expected_status,
 			status, enabled, next_check_at, created_at, updated_at,
 			last_status_code, last_latency_ms, last_checked_at, last_error
 	`, monitor.ID, monitor.URL, monitor.IntervalSeconds, monitor.TimeoutSeconds, monitor.ExpectedStatus,
-		monitor.Status, monitor.Enabled, monitor.NextCheckAt, monitor.CreatedAt, monitor.UpdatedAt)
+		monitor.Status, monitor.Enabled)
 
 	created, err := scanMonitor(row)
 	if isUniqueViolation(err) {
@@ -165,7 +165,10 @@ func (r *PostgresMonitorRepository) Update(ctx context.Context, id string, patch
 		return Monitor{}, err
 	}
 
-	now := time.Now().UTC()
+	now, err := databaseTime(ctx, tx)
+	if err != nil {
+		return Monitor{}, err
+	}
 	checkSemanticsChanged := updated.URL != current.URL ||
 		updated.TimeoutSeconds != current.TimeoutSeconds ||
 		updated.ExpectedStatus != current.ExpectedStatus
@@ -247,13 +250,16 @@ func (r *PostgresMonitorRepository) Delete(ctx context.Context, id string) error
 	return nil
 }
 
-func (r *PostgresMonitorRepository) CreateManualJob(ctx context.Context, id string, now time.Time) (CheckJobRecord, bool, error) {
-	now = now.UTC()
+func (r *PostgresMonitorRepository) CreateManualJob(ctx context.Context, id string) (CheckJobRecord, bool, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return CheckJobRecord{}, false, err
 	}
 	defer tx.Rollback(ctx)
+	now, err := databaseTime(ctx, tx)
+	if err != nil {
+		return CheckJobRecord{}, false, err
+	}
 
 	var monitorID string
 	err = tx.QueryRow(ctx, `
@@ -309,24 +315,26 @@ func (r *PostgresMonitorRepository) CreateManualJob(ctx context.Context, id stri
 	return job, true, nil
 }
 
-func (r *PostgresMonitorRepository) ClaimDueJobs(ctx context.Context, limit int, now time.Time, leaseTimeout time.Duration, maxAttempts int) ([]CheckJobRecord, error) {
+func (r *PostgresMonitorRepository) ClaimDueJobs(ctx context.Context, limit int, leaseTimeout time.Duration, maxAttempts int) ([]CheckJobRecord, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
-	now = now.UTC()
 	if leaseTimeout <= 0 {
 		leaseTimeout = time.Minute
 	}
 	if maxAttempts <= 0 {
 		maxAttempts = defaultMaxJobAttempts
 	}
-	leaseExpiresAt := now.Add(leaseTimeout)
-
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	now, err := databaseTime(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	leaseExpiresAt := now.Add(leaseTimeout)
 
 	if _, err := tx.Exec(ctx, `
 		WITH exhausted AS (
@@ -501,17 +509,17 @@ func (r *PostgresMonitorRepository) GetCheckJob(ctx context.Context, jobID strin
 	return job, err
 }
 
-func (r *PostgresMonitorRepository) MarkJobPublished(ctx context.Context, id, jobID string, now time.Time) error {
+func (r *PostgresMonitorRepository) MarkJobPublished(ctx context.Context, id, jobID string) error {
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE check_jobs
 		SET status = 'queued',
-			published_at = $3::timestamptz,
+			published_at = clock_timestamp(),
 			lease_expires_at = NULL,
-			updated_at = $3::timestamptz
+			updated_at = clock_timestamp()
 		WHERE id = $2
 			AND monitor_id = $1
 			AND status = 'scheduled'
-	`, id, jobID, now.UTC())
+	`, id, jobID)
 	if err != nil {
 		return err
 	}
@@ -521,16 +529,16 @@ func (r *PostgresMonitorRepository) MarkJobPublished(ctx context.Context, id, jo
 	return r.acceptAdvancedJobState(ctx, id, jobID)
 }
 
-func (r *PostgresMonitorRepository) ReleaseJobPublish(ctx context.Context, id, jobID, lastError string, now time.Time) error {
+func (r *PostgresMonitorRepository) ReleaseJobPublish(ctx context.Context, id, jobID, lastError string) error {
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE check_jobs
 		SET lease_expires_at = NULL,
 			last_error = $3,
-			updated_at = $4::timestamptz
+			updated_at = clock_timestamp()
 		WHERE id = $2
 			AND monitor_id = $1
 			AND status = 'scheduled'
-	`, id, jobID, lastError, now.UTC())
+	`, id, jobID, lastError)
 	if err != nil {
 		return err
 	}
@@ -540,36 +548,38 @@ func (r *PostgresMonitorRepository) ReleaseJobPublish(ctx context.Context, id, j
 	return r.acceptAdvancedJobState(ctx, id, jobID)
 }
 
-func (r *PostgresMonitorRepository) MarkJobProcessing(ctx context.Context, id, jobID string, attempt int, now time.Time, leaseTimeout time.Duration) (ProcessingLease, error) {
-	now = now.UTC()
+func (r *PostgresMonitorRepository) MarkJobProcessing(ctx context.Context, id, jobID string, attempt int, leaseTimeout time.Duration) (ProcessingLease, error) {
 	if leaseTimeout <= 0 {
 		leaseTimeout = time.Minute
 	}
-	leaseExpiresAt := now.Add(leaseTimeout)
 	leaseToken := newID("lease")
 	attempt = max(attempt, 1)
 
 	var persistedAttempt int
 	err := r.pool.QueryRow(ctx, `
+		WITH db_clock AS MATERIALIZED (
+			SELECT clock_timestamp() AS now
+		)
 		UPDATE check_jobs
 		SET status = 'processing',
 			attempt = $3,
-			processing_started_at = $4::timestamptz,
-			lease_expires_at = $5::timestamptz,
-			lease_token = $6,
-			updated_at = $4::timestamptz
+			processing_started_at = db_clock.now,
+			lease_expires_at = db_clock.now + ($4::bigint * interval '1 microsecond'),
+			lease_token = $5,
+			updated_at = db_clock.now
+		FROM db_clock
 		WHERE id = $2
 			AND monitor_id = $1
 			AND (
 				(status IN ('scheduled', 'queued') AND $3 > attempt)
 				OR (
 					status = 'processing'
-					AND lease_expires_at <= $4::timestamptz
+					AND lease_expires_at <= db_clock.now
 					AND $3 >= attempt
 				)
 			)
 		RETURNING attempt
-	`, id, jobID, attempt, now, leaseExpiresAt, leaseToken).Scan(&persistedAttempt)
+	`, id, jobID, attempt, leaseTimeout.Microseconds(), leaseToken).Scan(&persistedAttempt)
 	if err == nil {
 		return ProcessingLease{JobID: jobID, MonitorID: id, Attempt: persistedAttempt, LeaseToken: leaseToken}, nil
 	}
@@ -587,22 +597,23 @@ func (r *PostgresMonitorRepository) MarkJobProcessing(ctx context.Context, id, j
 	return ProcessingLease{}, ErrStaleJob
 }
 
-func (r *PostgresMonitorRepository) MarkJobFailed(ctx context.Context, lease ProcessingLease, lastError string, now, retryAt time.Time) error {
+func (r *PostgresMonitorRepository) MarkJobFailed(ctx context.Context, lease ProcessingLease, lastError string, retryDelay time.Duration) error {
+	retryDelay = max(retryDelay, 0)
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE check_jobs
 		SET status = 'failed',
-			available_at = $7::timestamptz,
+			available_at = clock_timestamp() + ($6::bigint * interval '1 microsecond'),
 			processing_started_at = NULL,
 			lease_expires_at = NULL,
 			lease_token = NULL,
 			last_error = $5,
-			updated_at = $6::timestamptz
+			updated_at = clock_timestamp()
 		WHERE id = $1
 			AND monitor_id = $2
 			AND status = 'processing'
 			AND attempt = $3
 			AND lease_token = $4
-	`, lease.JobID, lease.MonitorID, lease.Attempt, lease.LeaseToken, lastError, now.UTC(), retryAt.UTC())
+	`, lease.JobID, lease.MonitorID, lease.Attempt, lease.LeaseToken, lastError, retryDelay.Microseconds())
 	if err != nil {
 		return err
 	}
@@ -612,12 +623,16 @@ func (r *PostgresMonitorRepository) MarkJobFailed(ctx context.Context, lease Pro
 	return r.classifyInactiveJob(ctx, lease.MonitorID, lease.JobID)
 }
 
-func (r *PostgresMonitorRepository) MarkJobDead(ctx context.Context, lease ProcessingLease, lastError string, now, nextCheckAt time.Time) error {
+func (r *PostgresMonitorRepository) MarkJobDead(ctx context.Context, lease ProcessingLease, lastError string) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	now, err := databaseTime(ctx, tx)
+	if err != nil {
+		return err
+	}
 
 	var monitorID string
 	err = tx.QueryRow(ctx, `
@@ -659,10 +674,10 @@ func (r *PostgresMonitorRepository) MarkJobDead(ctx context.Context, lease Proce
 	if kind == checkJobKindScheduled {
 		tag, err := tx.Exec(ctx, `
 		UPDATE monitors
-		SET next_check_at = $2::timestamptz,
-			updated_at = $3::timestamptz
+		SET next_check_at = $2::timestamptz + (interval_seconds * interval '1 second'),
+			updated_at = $2::timestamptz
 		WHERE id = $1
-		`, lease.MonitorID, nextCheckAt.UTC(), now.UTC())
+		`, lease.MonitorID, now)
 		if err != nil {
 			return err
 		}
@@ -743,7 +758,10 @@ func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRe
 		return Monitor{}, ErrDuplicateJob
 	}
 
-	updatedAt := time.Now().UTC()
+	updatedAt, err := databaseTime(ctx, tx)
+	if err != nil {
+		return Monitor{}, err
+	}
 	monitor, err := scanMonitor(tx.QueryRow(ctx, `
 		UPDATE monitors
 		SET last_status_code = $2,
@@ -751,7 +769,7 @@ func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRe
 			last_checked_at = $4::timestamptz,
 			last_error = $5,
 			next_check_at = CASE
-				WHEN $7 = 'scheduled' THEN $4::timestamptz + (interval_seconds * interval '1 second')
+				WHEN $7 = 'scheduled' THEN $6::timestamptz + (interval_seconds * interval '1 second')
 				ELSE next_check_at
 			END,
 			updated_at = $6::timestamptz
@@ -789,7 +807,7 @@ func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRe
 		return Monitor{}, ErrStaleJob
 	}
 
-	if err := upsertIncidentAndAlert(ctx, tx, record, monitor, alertPolicy); err != nil {
+	if err := upsertIncidentAndAlert(ctx, tx, record, monitor, alertPolicy, updatedAt); err != nil {
 		return Monitor{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -914,15 +932,56 @@ func (r *PostgresMonitorRepository) ListIncidents(ctx context.Context, status st
 	return incidents, total, err
 }
 
-func (r *PostgresMonitorRepository) ClaimAlerts(ctx context.Context, limit int, now time.Time, leaseTimeout time.Duration) ([]AlertOutboxEvent, error) {
+func (r *PostgresMonitorRepository) ClaimAlerts(ctx context.Context, limit int, leaseTimeout time.Duration, maxAttempts int) ([]AlertOutboxEvent, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	if leaseTimeout <= 0 {
+		leaseTimeout = defaultAlertLeaseTimeout
+	}
+	if maxAttempts <= 0 {
+		maxAttempts = defaultAlertMaxAttempts
+	}
 	leaseToken := newID("lease")
-	lockedUntil := now.UTC().Add(leaseTimeout)
-	rows, err := r.pool.Query(ctx, `
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	now, err := databaseTime(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	lockedUntil := now.Add(leaseTimeout)
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE alert_outbox
+		SET status = 'dead',
+			lease_token = NULL,
+			locked_until = NULL,
+			last_error = CASE
+				WHEN last_error = '' THEN 'maximum delivery attempts reached after lease expiry'
+				ELSE last_error
+			END,
+			updated_at = $1::timestamptz
+		WHERE attempt_count >= $2
+			AND (
+				status = 'pending'
+				OR (status = 'processing' AND locked_until <= $1::timestamptz)
+			)
+	`, now, maxAttempts); err != nil {
+		return nil, err
+	}
+
+	rows, err := tx.Query(ctx, `
 		WITH candidates AS (
 			SELECT id
 			FROM alert_outbox
-			WHERE (status = 'pending' AND available_at <= $2::timestamptz)
-				OR (status = 'processing' AND locked_until <= $2::timestamptz)
+			WHERE attempt_count < $5
+				AND (
+					(status = 'pending' AND available_at <= $2::timestamptz)
+					OR (status = 'processing' AND locked_until <= $2::timestamptz)
+				)
 			ORDER BY available_at, created_at, id
 			FOR UPDATE SKIP LOCKED
 			LIMIT $1
@@ -937,12 +996,10 @@ func (r *PostgresMonitorRepository) ClaimAlerts(ctx context.Context, limit int, 
 		WHERE outbox.id = candidates.id
 		RETURNING outbox.id, outbox.idempotency_key, outbox.incident_id,
 			outbox.monitor_id, outbox.payload, outbox.attempt_count, outbox.lease_token
-	`, limit, now.UTC(), leaseToken, lockedUntil)
+	`, limit, now, leaseToken, lockedUntil, maxAttempts)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
 	events := make([]AlertOutboxEvent, 0, limit)
 	for rows.Next() {
 		var (
@@ -958,29 +1015,39 @@ func (r *PostgresMonitorRepository) ClaimAlerts(ctx context.Context, limit int, 
 			&event.AttemptCount,
 			&event.LeaseToken,
 		); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		if err := json.Unmarshal(payloadJSON, &event.Payload); err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("decode alert outbox payload %s: %w", event.ID, err)
 		}
 		events = append(events, event)
 	}
-	return events, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return events, nil
 }
 
-func (r *PostgresMonitorRepository) MarkAlertDelivered(ctx context.Context, id, leaseToken string, deliveredAt time.Time) error {
+func (r *PostgresMonitorRepository) MarkAlertDelivered(ctx context.Context, id, leaseToken string) error {
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE alert_outbox
 		SET status = 'delivered',
-			delivered_at = $3::timestamptz,
+			delivered_at = clock_timestamp(),
 			lease_token = NULL,
 			locked_until = NULL,
 			last_error = '',
-			updated_at = $3::timestamptz
+			updated_at = clock_timestamp()
 		WHERE id = $1
 			AND status = 'processing'
 			AND lease_token = $2
-	`, id, leaseToken, deliveredAt.UTC())
+	`, id, leaseToken)
 	if err != nil {
 		return err
 	}
@@ -990,15 +1057,16 @@ func (r *PostgresMonitorRepository) MarkAlertDelivered(ctx context.Context, id, 
 	return nil
 }
 
-func (r *PostgresMonitorRepository) MarkAlertFailed(ctx context.Context, id, leaseToken, lastError string, availableAt time.Time, dead bool) error {
+func (r *PostgresMonitorRepository) MarkAlertFailed(ctx context.Context, id, leaseToken, lastError string, retryDelay time.Duration, dead bool) error {
 	status := "pending"
 	if dead {
 		status = "dead"
 	}
+	retryDelay = max(retryDelay, 0)
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE alert_outbox
 		SET status = $3,
-			available_at = $4::timestamptz,
+			available_at = clock_timestamp() + ($4::bigint * interval '1 microsecond'),
 			lease_token = NULL,
 			locked_until = NULL,
 			last_error = $5,
@@ -1006,7 +1074,7 @@ func (r *PostgresMonitorRepository) MarkAlertFailed(ctx context.Context, id, lea
 		WHERE id = $1
 			AND status = 'processing'
 			AND lease_token = $2
-	`, id, leaseToken, status, availableAt.UTC(), truncateAlertError(lastError))
+	`, id, leaseToken, status, retryDelay.Microseconds(), truncateAlertError(lastError))
 	if err != nil {
 		return err
 	}
@@ -1258,17 +1326,16 @@ func scanIncident(row pgxScanner) (Incident, error) {
 	return incident, nil
 }
 
-func upsertIncidentAndAlert(ctx context.Context, tx pgx.Tx, record CheckRecord, monitor Monitor, alertPolicy AlertPolicy) error {
-	now := time.Now().UTC()
+func upsertIncidentAndAlert(ctx context.Context, tx pgx.Tx, record CheckRecord, monitor Monitor, alertPolicy AlertPolicy, now time.Time) error {
 	if record.Success {
 		_, err := tx.Exec(ctx, `
 		UPDATE incidents
 		SET status = $2,
 			resolved_at = $3::timestamptz,
-			updated_at = $4::timestamptz
+			updated_at = $3::timestamptz
 			WHERE monitor_id = $1
-				AND status = $5
-		`, record.MonitorID, incidentStatusResolved, record.CheckedAt.UTC(), now, incidentStatusOpen)
+				AND status = $4
+		`, record.MonitorID, incidentStatusResolved, now, incidentStatusOpen)
 		return err
 	}
 
@@ -1295,7 +1362,7 @@ func upsertIncidentAndAlert(ctx context.Context, tx pgx.Tx, record CheckRecord, 
 			last_error = EXCLUDED.last_error,
 			updated_at = EXCLUDED.updated_at
 		RETURNING id, failure_count, last_alerted_at
-	`, newID("inc"), record.MonitorID, incidentStatusOpen, record.CheckedAt.UTC(), lastError, now).Scan(
+	`, newID("inc"), record.MonitorID, incidentStatusOpen, now, lastError, now).Scan(
 		&incidentID,
 		&failureCount,
 		&lastAlerted,
@@ -1356,4 +1423,12 @@ func isUniqueViolation(err error) bool {
 	}
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+func databaseTime(ctx context.Context, querier pgxQueryRower) (time.Time, error) {
+	var now time.Time
+	if err := querier.QueryRow(ctx, "SELECT clock_timestamp()").Scan(&now); err != nil {
+		return time.Time{}, err
+	}
+	return now.UTC(), nil
 }

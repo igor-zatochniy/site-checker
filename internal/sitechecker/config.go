@@ -251,6 +251,9 @@ func LoadConfig() (Config, error) {
 	if cfg.AppEnv == "production" && cfg.StorageType != "postgres" {
 		errs = append(errs, errors.New("STORAGE_TYPE=postgres is required in production"))
 	}
+	if cfg.AppEnv == "production" && roleEnabled(cfg.AppRole, "scheduler") && cfg.QueueType != "rabbitmq" {
+		errs = append(errs, errors.New("QUEUE_TYPE=rabbitmq is required for scheduler-enabled production roles"))
+	}
 	switch cfg.AppRole {
 	case "api", "scheduler", "worker":
 		if cfg.StorageType != "postgres" {

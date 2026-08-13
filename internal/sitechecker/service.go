@@ -70,12 +70,12 @@ func (s *MonitorService) ListIncidents(ctx context.Context, status string, offse
 	return s.repo.ListIncidents(ctx, status, offset, limit)
 }
 
-func (s *MonitorService) ClaimDueJobs(ctx context.Context, limit int, now time.Time, leaseTimeout time.Duration, maxAttempts int) ([]CheckJobRecord, error) {
-	return s.repo.ClaimDueJobs(ctx, limit, now, leaseTimeout, maxAttempts)
+func (s *MonitorService) ClaimDueJobs(ctx context.Context, limit int, leaseTimeout time.Duration, maxAttempts int) ([]CheckJobRecord, error) {
+	return s.repo.ClaimDueJobs(ctx, limit, leaseTimeout, maxAttempts)
 }
 
-func (s *MonitorService) QueueManualCheck(ctx context.Context, id string, now time.Time) (ManualCheckJobReceipt, error) {
-	job, created, err := s.repo.CreateManualJob(ctx, id, now)
+func (s *MonitorService) QueueManualCheck(ctx context.Context, id string) (ManualCheckJobReceipt, error) {
+	job, created, err := s.repo.CreateManualJob(ctx, id)
 	if err != nil {
 		return ManualCheckJobReceipt{}, err
 	}
@@ -89,24 +89,24 @@ func (s *MonitorService) QueueManualCheck(ctx context.Context, id string, now ti
 	}, nil
 }
 
-func (s *MonitorService) MarkJobPublished(ctx context.Context, id, jobID string, now time.Time) error {
-	return s.repo.MarkJobPublished(ctx, id, jobID, now)
+func (s *MonitorService) MarkJobPublished(ctx context.Context, id, jobID string) error {
+	return s.repo.MarkJobPublished(ctx, id, jobID)
 }
 
-func (s *MonitorService) ReleaseJobPublish(ctx context.Context, id, jobID, lastError string, now time.Time) error {
-	return s.repo.ReleaseJobPublish(ctx, id, jobID, lastError, now)
+func (s *MonitorService) ReleaseJobPublish(ctx context.Context, id, jobID, lastError string) error {
+	return s.repo.ReleaseJobPublish(ctx, id, jobID, lastError)
 }
 
-func (s *MonitorService) MarkProcessing(ctx context.Context, id, jobID string, attempt int, now time.Time, leaseTimeout time.Duration) (ProcessingLease, error) {
-	return s.repo.MarkJobProcessing(ctx, id, jobID, attempt, now, leaseTimeout)
+func (s *MonitorService) MarkProcessing(ctx context.Context, id, jobID string, attempt int, leaseTimeout time.Duration) (ProcessingLease, error) {
+	return s.repo.MarkJobProcessing(ctx, id, jobID, attempt, leaseTimeout)
 }
 
-func (s *MonitorService) MarkJobFailed(ctx context.Context, lease ProcessingLease, lastError string, now, retryAt time.Time) error {
-	return s.repo.MarkJobFailed(ctx, lease, lastError, now, retryAt)
+func (s *MonitorService) MarkJobFailed(ctx context.Context, lease ProcessingLease, lastError string, retryDelay time.Duration) error {
+	return s.repo.MarkJobFailed(ctx, lease, lastError, retryDelay)
 }
 
-func (s *MonitorService) FailProcessing(ctx context.Context, lease ProcessingLease, lastError string, now, nextCheckAt time.Time) error {
-	return s.repo.MarkJobDead(ctx, lease, lastError, now, nextCheckAt)
+func (s *MonitorService) FailProcessing(ctx context.Context, lease ProcessingLease, lastError string) error {
+	return s.repo.MarkJobDead(ctx, lease, lastError)
 }
 
 func (s *MonitorService) StoreCheckResult(ctx context.Context, record CheckRecord, result CheckResult, lease ProcessingLease) error {

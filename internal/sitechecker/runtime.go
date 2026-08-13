@@ -118,8 +118,7 @@ func RunQueueScheduler(ctx context.Context, service *MonitorService, queue JobQu
 }
 
 func enqueueDueMonitorJobs(ctx context.Context, service *MonitorService, queue JobQueue, limit int, leaseTimeout time.Duration, maxAttempts int, logger *slog.Logger) {
-	now := time.Now().UTC()
-	jobs, err := service.ClaimDueJobs(ctx, limit, now, leaseTimeout, maxAttempts)
+	jobs, err := service.ClaimDueJobs(ctx, limit, leaseTimeout, maxAttempts)
 	if err != nil {
 		logger.Warn("Failed to claim due check jobs", "error", err)
 		return
@@ -130,10 +129,10 @@ func enqueueDueMonitorJobs(ctx context.Context, service *MonitorService, queue J
 			JobID:      persistedJob.ID,
 			MonitorID:  persistedJob.MonitorID,
 			Attempt:    persistedJob.Attempt + 1,
-			EnqueuedAt: now,
+			EnqueuedAt: time.Now().UTC(),
 		}
 		if err := queue.Publish(ctx, message); err != nil {
-			if releaseErr := service.ReleaseJobPublish(ctx, persistedJob.MonitorID, persistedJob.ID, "broker publish failed", time.Now().UTC()); releaseErr != nil {
+			if releaseErr := service.ReleaseJobPublish(ctx, persistedJob.MonitorID, persistedJob.ID, "broker publish failed"); releaseErr != nil {
 				logger.Warn("Failed to release check job publish lease",
 					"monitor_id", persistedJob.MonitorID,
 					"job_id", persistedJob.ID,
@@ -144,7 +143,7 @@ func enqueueDueMonitorJobs(ctx context.Context, service *MonitorService, queue J
 			logger.Warn("Failed to publish monitor job", "monitor_id", persistedJob.MonitorID, "job_id", persistedJob.ID, "error", err)
 			continue
 		}
-		if err := service.MarkJobPublished(ctx, persistedJob.MonitorID, persistedJob.ID, time.Now().UTC()); err != nil {
+		if err := service.MarkJobPublished(ctx, persistedJob.MonitorID, persistedJob.ID); err != nil {
 			logger.Warn("Failed to persist published check job state",
 				"monitor_id", persistedJob.MonitorID,
 				"job_id", persistedJob.ID,
@@ -247,7 +246,7 @@ func handleQueueDeliveryWithBackoff(ctx context.Context, workerID int, service *
 		return requeueInfrastructureFailure(ctx, delivery, err, workerID, "monitor lookup", backoff, service.metrics, logger)
 	}
 
-	lease, err := service.MarkProcessing(ctx, delivery.Job.MonitorID, delivery.Job.JobID, delivery.Job.Attempt, time.Now().UTC(), leaseTimeout)
+	lease, err := service.MarkProcessing(ctx, delivery.Job.MonitorID, delivery.Job.JobID, delivery.Job.Attempt, leaseTimeout)
 	if err != nil {
 		if errors.Is(err, ErrStaleJob) || errors.Is(err, ErrJobAlreadyProcessing) || errors.Is(err, ErrMonitorNotFound) {
 			backoff.Reset()
@@ -269,9 +268,7 @@ func handleQueueDeliveryWithBackoff(ctx context.Context, workerID int, service *
 	if err := service.StoreCheckResult(ctx, record, result, lease); err != nil {
 		if delivery.Retryable {
 			if stateErr := retryJobStateTransition(ctx, func(ctx context.Context) error {
-				now := time.Now().UTC()
-				retryAt := now.Add(checkJobRetryDelay(delivery.Job.Attempt))
-				return service.MarkJobFailed(ctx, lease, "result persistence failed", now, retryAt)
+				return service.MarkJobFailed(ctx, lease, "result persistence failed", checkJobRetryDelay(delivery.Job.Attempt))
 			}); stateErr != nil {
 				if ackInactiveJob(ctx, delivery, stateErr, workerID, logger) {
 					return nil
@@ -284,10 +281,8 @@ func handleQueueDeliveryWithBackoff(ctx context.Context, workerID int, service *
 				return fmt.Errorf("ack job after persisting retry state: %w", ackErr)
 			}
 		} else {
-			now := time.Now().UTC()
-			nextCheckAt := now.Add(time.Duration(monitor.IntervalSeconds) * time.Second)
 			if stateErr := retryJobStateTransition(ctx, func(ctx context.Context) error {
-				return service.FailProcessing(ctx, lease, "result persistence failed", now, nextCheckAt)
+				return service.FailProcessing(ctx, lease, "result persistence failed")
 			}); stateErr != nil {
 				if ackInactiveJob(ctx, delivery, stateErr, workerID, logger) {
 					return nil

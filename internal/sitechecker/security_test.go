@@ -1,12 +1,101 @@
 package sitechecker
 
 import (
+	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"testing"
 	"time"
 )
+
+func TestNetworkPolicyPinsValidatedDNSAnswerForDial(t *testing.T) {
+	resolver := &sequenceIPResolver{answers: [][]netip.Addr{
+		{netip.MustParseAddr("93.184.216.34")},
+		{netip.MustParseAddr("127.0.0.1")},
+	}}
+	dialer := &recordingNetworkDialer{}
+	policy := NewNetworkPolicy(Config{AllowedPorts: map[int]struct{}{80: {}}})
+	policy.resolver = resolver
+	policy.dialer = dialer
+
+	conn, err := policy.DialContext(t.Context(), "tcp", "rebind.example:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+	if resolver.calls != 1 {
+		t.Fatalf("DNS lookups during dial = %d, want exactly 1", resolver.calls)
+	}
+	if dialer.address != "93.184.216.34:80" {
+		t.Fatalf("dial address = %q, want validated public IP literal", dialer.address)
+	}
+	if _, err := policy.ResolveAllowedIPs(t.Context(), "rebind.example"); err == nil {
+		t.Fatal("second rebinding answer to loopback was accepted")
+	}
+}
+
+func TestNetworkPolicyFiltersPrivateAddressesFromMultiAAnswer(t *testing.T) {
+	policy := NewNetworkPolicy(Config{AllowedPorts: map[int]struct{}{443: {}}})
+	policy.resolver = &sequenceIPResolver{answers: [][]netip.Addr{{
+		netip.MustParseAddr("127.0.0.1"),
+		netip.MustParseAddr("93.184.216.34"),
+		netip.MustParseAddr("169.254.169.254"),
+	}}}
+	dialer := &recordingNetworkDialer{}
+	policy.dialer = dialer
+
+	conn, err := policy.DialContext(t.Context(), "tcp", "multi-a.example:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+	if dialer.address != "93.184.216.34:443" {
+		t.Fatalf("dial address = %q, want only allowed public address", dialer.address)
+	}
+}
+
+func TestRedirectHostnameIsResolvedThroughSSRFPolicy(t *testing.T) {
+	policy := NewNetworkPolicy(Config{MaxRedirects: 3, AllowedPorts: map[int]struct{}{80: {}}})
+	policy.resolver = &sequenceIPResolver{answers: [][]netip.Addr{{netip.MustParseAddr("169.254.169.254")}}}
+	redirectURL, err := url.Parse("http://redirect-to-metadata.example/latest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.CheckRedirect(&http.Request{URL: redirectURL}, []*http.Request{{}}); err != nil {
+		t.Fatalf("syntactically valid redirect hostname was rejected before DNS: %v", err)
+	}
+	if _, err := policy.DialContext(t.Context(), "tcp", "redirect-to-metadata.example:80"); err == nil {
+		t.Fatal("redirect hostname resolving to metadata address was dialed")
+	}
+}
+
+type sequenceIPResolver struct {
+	answers [][]netip.Addr
+	calls   int
+}
+
+func (r *sequenceIPResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	if r.calls >= len(r.answers) {
+		return nil, fmt.Errorf("unexpected DNS lookup %d", r.calls+1)
+	}
+	answer := append([]netip.Addr(nil), r.answers[r.calls]...)
+	r.calls++
+	return answer, nil
+}
+
+type recordingNetworkDialer struct {
+	address string
+}
+
+func (d *recordingNetworkDialer) DialContext(_ context.Context, _, address string) (net.Conn, error) {
+	d.address = address
+	client, server := net.Pipe()
+	_ = server.Close()
+	return client, nil
+}
 
 func TestNetworkPolicyBlocksPrivateAndMetadataAddresses(t *testing.T) {
 	policy := NewNetworkPolicy(Config{AllowedPorts: map[int]struct{}{80: {}, 443: {}}})

@@ -189,7 +189,7 @@ func TestRunQueueWorkersRetriesFromPersistedFailedState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	claimed, err := service.ClaimDueJobs(ctx, 1, time.Now().UTC(), time.Minute, defaultMaxJobAttempts)
+	claimed, err := service.ClaimDueJobs(ctx, 1, time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func TestHandleQueueDeliveryDoesNotRetryBeforeLeaseStateChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	claimed, err := service.ClaimDueJobs(ctx, 1, time.Now().UTC(), time.Minute, defaultMaxJobAttempts)
+	claimed, err := service.ClaimDueJobs(ctx, 1, time.Minute, defaultMaxJobAttempts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,7 +599,7 @@ func (r *failingLeaseTransitionRepository) AddCheck(context.Context, CheckRecord
 	return Monitor{}, errors.New("transient storage failure")
 }
 
-func (r *failingLeaseTransitionRepository) MarkJobFailed(context.Context, ProcessingLease, string, time.Time, time.Time) error {
+func (r *failingLeaseTransitionRepository) MarkJobFailed(context.Context, ProcessingLease, string, time.Duration) error {
 	r.mu.Lock()
 	r.markFailedCount++
 	r.mu.Unlock()

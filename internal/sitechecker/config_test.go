@@ -215,6 +215,16 @@ func TestLoadConfigRejectsUnsafeProductionAndSplitBackends(t *testing.T) {
 			env:  map[string]string{"APP_ENV": "production", "APP_ROLE": "all"},
 		},
 		{
+			name: "production all with PostgreSQL and memory queue",
+			env: map[string]string{
+				"APP_ENV":      "production",
+				"APP_ROLE":     "all",
+				"STORAGE_TYPE": "postgres",
+				"DATABASE_URL": "postgres://user:pass@example.com:5432/site_checker",
+				"QUEUE_TYPE":   "memory",
+			},
+		},
+		{
 			name: "split api with memory storage",
 			env:  map[string]string{"APP_ROLE": "api"},
 		},

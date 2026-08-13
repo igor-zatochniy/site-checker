@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"testing"
 	"time"
 
@@ -120,6 +121,48 @@ func TestRabbitMQQueueRetriesAndDeadLetters(t *testing.T) {
 	}
 	if err := queue.Ping(reconnectCtx); err != nil {
 		t.Fatalf("ping after reconnect: %v", err)
+	}
+
+	execRabbitMQControl(t, ctx, rabbit, "stop_app")
+	downCtx, downCancel := context.WithTimeout(ctx, 2*time.Second)
+	downErr := queue.Ping(downCtx)
+	downCancel()
+	if downErr == nil {
+		t.Fatal("RabbitMQ ping succeeded while broker application was stopped")
+	}
+	execRabbitMQControl(t, ctx, rabbit, "start_app")
+	brokerRestartCtx, brokerRestartCancel := context.WithTimeout(ctx, 45*time.Second)
+	defer brokerRestartCancel()
+	restartedJob := CheckJobMessage{
+		JobID:      "job_integration_broker_restart",
+		MonitorID:  "mon_integration",
+		Attempt:    1,
+		EnqueuedAt: time.Now().UTC(),
+	}
+	if err := queue.Publish(brokerRestartCtx, restartedJob); err != nil {
+		t.Fatalf("publish after RabbitMQ restart: %v", err)
+	}
+	restarted := receiveRabbitDelivery(t, deliveries)
+	if restarted.Job.JobID != restartedJob.JobID {
+		t.Fatalf("job after RabbitMQ restart = %q, want %q", restarted.Job.JobID, restartedJob.JobID)
+	}
+	if err := restarted.Ack(brokerRestartCtx); err != nil {
+		t.Fatalf("ack after RabbitMQ restart: %v", err)
+	}
+}
+
+func execRabbitMQControl(t *testing.T, ctx context.Context, container testcontainers.Container, command string) {
+	t.Helper()
+	exitCode, output, err := container.Exec(ctx, []string{"rabbitmqctl", command})
+	if err != nil {
+		t.Fatalf("rabbitmqctl %s: %v", command, err)
+	}
+	body, readErr := io.ReadAll(output)
+	if readErr != nil {
+		t.Fatalf("read rabbitmqctl %s output: %v", command, readErr)
+	}
+	if exitCode != 0 {
+		t.Fatalf("rabbitmqctl %s exit code %d: %s", command, exitCode, body)
 	}
 }
 

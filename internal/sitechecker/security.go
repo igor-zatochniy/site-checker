@@ -18,8 +18,16 @@ type NetworkPolicy struct {
 	allowProxyEnv        bool
 	maxRedirects         int
 	allowedPorts         map[int]struct{}
-	resolver             *net.Resolver
-	dialer               *net.Dialer
+	resolver             netIPResolver
+	dialer               networkDialer
+}
+
+type netIPResolver interface {
+	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
+}
+
+type networkDialer interface {
+	DialContext(ctx context.Context, network, address string) (net.Conn, error)
 }
 
 func NewNetworkPolicy(cfg Config) *NetworkPolicy {

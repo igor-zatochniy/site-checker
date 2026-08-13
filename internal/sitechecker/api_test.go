@@ -264,31 +264,31 @@ func (r failingMonitorRepository) Update(context.Context, string, MonitorPatch) 
 
 func (r failingMonitorRepository) Delete(context.Context, string) error { return r.err }
 
-func (r failingMonitorRepository) CreateManualJob(context.Context, string, time.Time) (CheckJobRecord, bool, error) {
+func (r failingMonitorRepository) CreateManualJob(context.Context, string) (CheckJobRecord, bool, error) {
 	return CheckJobRecord{}, false, r.err
 }
 
-func (r failingMonitorRepository) ClaimDueJobs(context.Context, int, time.Time, time.Duration, int) ([]CheckJobRecord, error) {
+func (r failingMonitorRepository) ClaimDueJobs(context.Context, int, time.Duration, int) ([]CheckJobRecord, error) {
 	return nil, r.err
 }
 
-func (r failingMonitorRepository) MarkJobPublished(context.Context, string, string, time.Time) error {
+func (r failingMonitorRepository) MarkJobPublished(context.Context, string, string) error {
 	return r.err
 }
 
-func (r failingMonitorRepository) ReleaseJobPublish(context.Context, string, string, string, time.Time) error {
+func (r failingMonitorRepository) ReleaseJobPublish(context.Context, string, string, string) error {
 	return r.err
 }
 
-func (r failingMonitorRepository) MarkJobProcessing(context.Context, string, string, int, time.Time, time.Duration) (ProcessingLease, error) {
+func (r failingMonitorRepository) MarkJobProcessing(context.Context, string, string, int, time.Duration) (ProcessingLease, error) {
 	return ProcessingLease{}, r.err
 }
 
-func (r failingMonitorRepository) MarkJobFailed(context.Context, ProcessingLease, string, time.Time, time.Time) error {
+func (r failingMonitorRepository) MarkJobFailed(context.Context, ProcessingLease, string, time.Duration) error {
 	return r.err
 }
 
-func (r failingMonitorRepository) MarkJobDead(context.Context, ProcessingLease, string, time.Time, time.Time) error {
+func (r failingMonitorRepository) MarkJobDead(context.Context, ProcessingLease, string) error {
 	return r.err
 }
 

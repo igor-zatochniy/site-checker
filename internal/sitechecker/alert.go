@@ -45,9 +45,9 @@ type AlertOutboxEvent struct {
 }
 
 type AlertOutboxRepository interface {
-	ClaimAlerts(ctx context.Context, limit int, now time.Time, leaseTimeout time.Duration) ([]AlertOutboxEvent, error)
-	MarkAlertDelivered(ctx context.Context, id, leaseToken string, deliveredAt time.Time) error
-	MarkAlertFailed(ctx context.Context, id, leaseToken, lastError string, availableAt time.Time, dead bool) error
+	ClaimAlerts(ctx context.Context, limit int, leaseTimeout time.Duration, maxAttempts int) ([]AlertOutboxEvent, error)
+	MarkAlertDelivered(ctx context.Context, id, leaseToken string) error
+	MarkAlertFailed(ctx context.Context, id, leaseToken, lastError string, retryDelay time.Duration, dead bool) error
 }
 
 type AlertSender struct {
@@ -118,8 +118,7 @@ func RunAlertDispatcher(ctx context.Context, repo AlertOutboxRepository, sender 
 }
 
 func dispatchAlertBatch(ctx context.Context, repo AlertOutboxRepository, sender *AlertSender, cfg Config, metrics *Metrics, logger *slog.Logger) (int, error) {
-	now := time.Now().UTC()
-	events, err := repo.ClaimAlerts(ctx, cfg.AlertDispatchBatchSize, now, cfg.AlertLeaseTimeout)
+	events, err := repo.ClaimAlerts(ctx, cfg.AlertDispatchBatchSize, cfg.AlertLeaseTimeout, cfg.AlertMaxAttempts)
 	if err != nil {
 		return 0, err
 	}
@@ -144,7 +143,7 @@ func dispatchAlert(ctx context.Context, repo AlertOutboxRepository, sender *Aler
 	deliveryErr := sender.Send(deliveryCtx, event)
 	cancel()
 	if deliveryErr == nil {
-		if err := repo.MarkAlertDelivered(ctx, event.ID, event.LeaseToken, time.Now().UTC()); err != nil {
+		if err := repo.MarkAlertDelivered(ctx, event.ID, event.LeaseToken); err != nil {
 			if !errors.Is(err, ErrStaleAlertLease) {
 				logger.Warn("Failed to mark alert as delivered", "event_id", event.ID, "error", err)
 			}
@@ -158,8 +157,8 @@ func dispatchAlert(ctx context.Context, repo AlertOutboxRepository, sender *Aler
 		return
 	}
 	dead := event.AttemptCount >= cfg.AlertMaxAttempts
-	availableAt := time.Now().UTC().Add(alertRetryDelay(event.AttemptCount, cfg.AlertRetryInitialBackoff, cfg.AlertRetryMaxBackoff))
-	if err := repo.MarkAlertFailed(ctx, event.ID, event.LeaseToken, deliveryErr.Error(), availableAt, dead); err != nil {
+	retryDelay := alertRetryDelay(event.AttemptCount, cfg.AlertRetryInitialBackoff, cfg.AlertRetryMaxBackoff)
+	if err := repo.MarkAlertFailed(ctx, event.ID, event.LeaseToken, deliveryErr.Error(), retryDelay, dead); err != nil {
 		if !errors.Is(err, ErrStaleAlertLease) {
 			logger.Warn("Failed to persist alert delivery failure", "event_id", event.ID, "error", err)
 		}
