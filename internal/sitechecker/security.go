@@ -175,8 +175,23 @@ func (p *NetworkPolicy) DialContext(ctx context.Context, network, address string
 	}
 
 	var lastErr error
-	for _, ip := range ips {
-		conn, err := p.dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+	for index, ip := range ips {
+		dialCtx := ctx
+		cancel := func() {}
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return nil, ctx.Err()
+			}
+			remainingAddresses := len(ips) - index
+			budget := remaining / time.Duration(remainingAddresses)
+			if budget <= 0 {
+				budget = time.Nanosecond
+			}
+			dialCtx, cancel = context.WithTimeout(ctx, budget)
+		}
+		conn, err := p.dialer.DialContext(dialCtx, network, net.JoinHostPort(ip.String(), port))
+		cancel()
 		if err == nil {
 			return conn, nil
 		}

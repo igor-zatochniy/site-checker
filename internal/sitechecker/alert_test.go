@@ -229,8 +229,19 @@ func TestAlertRetryDelayIsBounded(t *testing.T) {
 }
 
 func TestParseRetryAfterIsBounded(t *testing.T) {
-	if got := parseRetryAfter("999999999999999999", time.Now()); got != maxAlertRetryAfter {
+	if got := parseRetryAfter("999999999999999999", ""); got != maxAlertRetryAfter {
 		t.Fatalf("large Retry-After = %s, want %s", got, maxAlertRetryAfter)
+	}
+}
+
+func TestParseRetryAfterHTTPDateUsesServerDate(t *testing.T) {
+	serverTime := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	retryAt := serverTime.Add(2 * time.Minute)
+	if got := parseRetryAfter(retryAt.Format(http.TimeFormat), serverTime.Format(http.TimeFormat)); got != 2*time.Minute {
+		t.Fatalf("HTTP-date Retry-After = %s, want 2m", got)
+	}
+	if got := parseRetryAfter(retryAt.Format(http.TimeFormat), ""); got != 0 {
+		t.Fatalf("HTTP-date Retry-After without server Date = %s, want exponential fallback", got)
 	}
 }
 

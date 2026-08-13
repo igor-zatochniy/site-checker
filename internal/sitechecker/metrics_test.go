@@ -9,6 +9,7 @@ import (
 
 func TestMetricsUseBoundedMonitorIDsWithoutExposingURLs(t *testing.T) {
 	metrics := NewMetrics("test", "commit", "date", 0)
+	recordedAt := time.Now().UTC()
 	metrics.RecordResult(CheckResult{
 		MonitorID:  "mon_1",
 		URL:        "https://example.com/health?token=secret",
@@ -16,7 +17,7 @@ func TestMetricsUseBoundedMonitorIDsWithoutExposingURLs(t *testing.T) {
 		StatusCode: 200,
 		Duration:   time.Millisecond,
 		CheckedAt:  time.Now().UTC(),
-	})
+	}, recordedAt)
 
 	output := metrics.Prometheus()
 	if strings.Contains(output, "token=secret") || strings.Contains(output, "https://example.com") {
@@ -33,7 +34,7 @@ func TestMetricsUseBoundedMonitorIDsWithoutExposingURLs(t *testing.T) {
 			StatusCode: 200,
 			Duration:   time.Millisecond,
 			CheckedAt:  time.Now().UTC(),
-		})
+		}, time.Now().UTC())
 	}
 
 	snapshot := metrics.Snapshot()
@@ -42,5 +43,20 @@ func TestMetricsUseBoundedMonitorIDsWithoutExposingURLs(t *testing.T) {
 	}
 	if _, exists := snapshot.UpByMonitor["mon_1"]; exists {
 		t.Fatal("oldest monitor metric was not evicted")
+	}
+}
+
+func TestMetricsUseAuthoritativeRecordedTime(t *testing.T) {
+	metrics := NewMetrics("test", "commit", "date", 0)
+	recordedAt := time.Now().UTC()
+	metrics.RecordResult(CheckResult{
+		MonitorID: "mon_1",
+		Healthy:   true,
+		CheckedAt: recordedAt.Add(24 * time.Hour),
+	}, recordedAt)
+
+	snapshot := metrics.Snapshot()
+	if !snapshot.LastCheckAt.Equal(recordedAt) || !snapshot.LastSuccessAt.Equal(recordedAt) {
+		t.Fatalf("metric timestamps = check:%s success:%s, want %s", snapshot.LastCheckAt, snapshot.LastSuccessAt, recordedAt)
 	}
 }

@@ -27,11 +27,44 @@ func TestReleaseImageWaitsForIntegrationAndReusesScannedImage(t *testing.T) {
 	if !strings.Contains(dockerJob, "needs: integration") {
 		t.Fatal("docker release job does not wait for integration tests")
 	}
-	if count := strings.Count(dockerJob, "uses: docker/build-push-action@v6"); count != 1 {
+	if count := strings.Count(dockerJob, "uses: docker/build-push-action@"); count != 1 {
 		t.Fatalf("docker job builds the image %d times, want exactly once", count)
 	}
 	if !strings.Contains(dockerJob, "docker tag site-checker:ci") ||
 		!strings.Contains(dockerJob, "docker push \"${IMAGE_NAME}:${RELEASE_TAG}\"") {
 		t.Fatal("release does not publish the already scanned local image")
+	}
+	globalSection := workflow[:strings.Index(workflow, "\njobs:\n")]
+	if strings.Contains(globalSection, "packages: write") {
+		t.Fatal("workflow grants packages:write globally")
+	}
+	if !strings.Contains(dockerJob, "permissions:\n      contents: read\n      packages: write") {
+		t.Fatal("docker release job does not declare scoped package write permission")
+	}
+	for _, line := range strings.Split(workflow, "\n") {
+		assertActionPinned(t, line)
+	}
+	pagesContent, err := os.ReadFile(filepath.Join(workingDirectory, "..", "..", ".github", "workflows", "pages.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(pagesContent), "\n") {
+		assertActionPinned(t, line)
+	}
+}
+
+func assertActionPinned(t *testing.T, line string) {
+	t.Helper()
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "uses:") {
+		return
+	}
+	parts := strings.SplitN(line, "@", 2)
+	if len(parts) != 2 {
+		t.Fatalf("action has no immutable ref: %s", line)
+	}
+	ref := strings.Fields(parts[1])[0]
+	if len(ref) != 40 {
+		t.Fatalf("action is not pinned to a commit SHA: %s", line)
 	}
 }

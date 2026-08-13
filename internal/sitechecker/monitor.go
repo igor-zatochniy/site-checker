@@ -316,6 +316,8 @@ func (s *MonitorStore) Update(id string, patch MonitorPatch) (Monitor, error) {
 	checkSemanticsChanged := updated.URL != monitor.URL ||
 		updated.TimeoutSeconds != monitor.TimeoutSeconds ||
 		updated.ExpectedStatus != monitor.ExpectedStatus
+	intervalChanged := updated.IntervalSeconds != monitor.IntervalSeconds
+	enabledChanged := updated.Enabled != monitor.Enabled
 
 	if existingID, exists := s.byURL[updated.URL]; exists && existingID != id {
 		return Monitor{}, ErrMonitorExists
@@ -329,7 +331,12 @@ func (s *MonitorStore) Update(id string, patch MonitorPatch) (Monitor, error) {
 	updated.UpdatedAt = now
 	if updated.Enabled {
 		updated.Status = monitorStatusActive
-		if checkSemanticsChanged || updated.NextCheckAt.IsZero() || updated.NextCheckAt.Before(now) {
+		switch {
+		case checkSemanticsChanged || (enabledChanged && !monitor.Enabled):
+			updated.NextCheckAt = now
+		case intervalChanged:
+			updated.NextCheckAt = nextCheckAfterIntervalChange(monitor.LastCheckedAt, now, updated.IntervalSeconds)
+		case updated.NextCheckAt.IsZero() || updated.NextCheckAt.Before(now):
 			updated.NextCheckAt = now
 		}
 	} else {
@@ -341,6 +348,7 @@ func (s *MonitorStore) Update(id string, patch MonitorPatch) (Monitor, error) {
 		updated.LastLatencyMS = 0
 		updated.LastCheckedAt = time.Time{}
 		updated.LastError = ""
+		s.resolveOpenIncidentLocked(id, now)
 		if updated.Enabled {
 			s.finishActiveJobLocked(id, checkJobStatusDead, "monitor configuration changed", now)
 		}
@@ -348,6 +356,35 @@ func (s *MonitorStore) Update(id string, patch MonitorPatch) (Monitor, error) {
 
 	s.byID[id] = updated
 	return updated, nil
+}
+
+func nextCheckAfterIntervalChange(lastCheckedAt, now time.Time, intervalSeconds int) time.Time {
+	now = now.UTC()
+	if lastCheckedAt.IsZero() {
+		return now
+	}
+	nextCheckAt := lastCheckedAt.UTC().Add(time.Duration(intervalSeconds) * time.Second)
+	if !nextCheckAt.After(now) {
+		return now
+	}
+	return nextCheckAt
+}
+
+func (s *MonitorStore) resolveOpenIncidentLocked(monitorID string, now time.Time) {
+	incidentID, exists := s.openIncidentByMonitor[monitorID]
+	if !exists {
+		return
+	}
+	incident, exists := s.incidents[incidentID]
+	if !exists {
+		delete(s.openIncidentByMonitor, monitorID)
+		return
+	}
+	incident.Status = incidentStatusResolved
+	incident.ResolvedAt = now.UTC()
+	incident.UpdatedAt = now.UTC()
+	s.incidents[incidentID] = incident
+	delete(s.openIncidentByMonitor, monitorID)
 }
 
 func (s *MonitorStore) Delete(id string) error {
@@ -803,7 +840,7 @@ func (s *MonitorStore) AddCheck(record CheckRecord, lease ProcessingLease) (Moni
 	s.rememberTerminalJobLocked(record.JobID)
 	monitor.LastStatusCode = record.StatusCode
 	monitor.LastLatencyMS = record.LatencyMS
-	monitor.LastCheckedAt = record.CheckedAt
+	monitor.LastCheckedAt = now
 	monitor.LastError = record.Error
 	if job.Kind == checkJobKindScheduled {
 		monitor.NextCheckAt = now.Add(time.Duration(monitor.IntervalSeconds) * time.Second)
@@ -981,11 +1018,11 @@ func (s *MonitorStore) Stats(id string) (MonitorStats, error) {
 			stats.SuccessfulChecks++
 		} else {
 			stats.FailedChecks++
-			if stats.ConsecutiveFailure == len(records)-1-i {
-				stats.ConsecutiveFailure++
-			}
 		}
 		latencyTotal += record.LatencyMS
+	}
+	if incidentID, exists := s.openIncidentByMonitor[id]; exists {
+		stats.ConsecutiveFailure = s.incidents[incidentID].FailureCount
 	}
 	stats.UptimePercent = float64(stats.SuccessfulChecks) / float64(len(records)) * 100
 	stats.AverageLatencyMS = float64(latencyTotal) / float64(len(records))

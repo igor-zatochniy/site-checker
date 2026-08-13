@@ -5,6 +5,7 @@ package sitechecker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -456,6 +457,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	}
 
 	verifyPostgresConfigurationUpdateInvalidatesActiveJob(t, ctx, repo)
+	verifyPostgresUpdateResetsIncidentAndReschedulesInterval(t, ctx, repo)
 	verifyPostgresRetentionDeletesOnlyExpiredTerminalData(t, ctx, repo)
 	verifyPostgresUsesAuthoritativeLifecycleClock(t, ctx, repo)
 	verifyPostgresUsesRecordedTimeForHistoryAndRetention(t, ctx, repo)
@@ -930,6 +932,168 @@ func verifyPostgresConfigurationUpdateInvalidatesActiveJob(
 		if incident.MonitorID == monitor.ID {
 			t.Fatalf("stale result created incident %+v", incident)
 		}
+	}
+}
+
+func verifyPostgresUpdateResetsIncidentAndReschedulesInterval(
+	t *testing.T,
+	ctx context.Context,
+	repo *PostgresMonitorRepository,
+) {
+	t.Helper()
+	monitor, err := repo.Create(ctx, MonitorInput{
+		URL:             "https://semantic-a.example.com",
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alertPolicy := AlertPolicy{Enabled: true, FailureThreshold: 3, Cooldown: time.Hour}
+	for index := range 2 {
+		processPostgresManualCheck(t, ctx, repo, monitor.ID, CheckRecord{
+			ID:         fmt.Sprintf("semantic_failure_%d", index),
+			MonitorID:  monitor.ID,
+			StatusCode: 500,
+			LatencyMS:  5,
+			Error:      "unexpected status code 500",
+			Success:    false,
+			CheckedAt:  time.Now().UTC(),
+		}, alertPolicy)
+	}
+	var oldIncidentID string
+	var oldFailureCount int
+	if err := repo.pool.QueryRow(ctx, `
+		SELECT id, failure_count
+		FROM incidents
+		WHERE monitor_id = $1 AND status = 'open'
+	`, monitor.ID).Scan(&oldIncidentID, &oldFailureCount); err != nil {
+		t.Fatal(err)
+	}
+	if oldFailureCount != 2 {
+		t.Fatalf("old incident failure_count = %d, want 2", oldFailureCount)
+	}
+
+	newURL := "https://semantic-b.example.com"
+	if _, err := repo.Update(ctx, monitor.ID, MonitorPatch{URL: &newURL}); err != nil {
+		t.Fatal(err)
+	}
+	var openCount int
+	if err := repo.pool.QueryRow(ctx, `SELECT count(*) FROM incidents WHERE monitor_id = $1 AND status = 'open'`, monitor.ID).Scan(&openCount); err != nil {
+		t.Fatal(err)
+	}
+	if openCount != 0 {
+		t.Fatalf("open incidents after semantic update = %d, want 0", openCount)
+	}
+	var oldStatus string
+	var oldResolvedAt time.Time
+	if err := repo.pool.QueryRow(ctx, `SELECT status, resolved_at FROM incidents WHERE id = $1`, oldIncidentID).Scan(&oldStatus, &oldResolvedAt); err != nil {
+		t.Fatal(err)
+	}
+	if oldStatus != incidentStatusResolved || oldResolvedAt.IsZero() {
+		t.Fatalf("old incident = status:%s resolved_at:%s, want resolved", oldStatus, oldResolvedAt)
+	}
+	stats, err := repo.Stats(ctx, monitor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ConsecutiveFailure != 0 || !stats.LastCheckedAt.IsZero() || stats.LastStatusCode != 0 {
+		t.Fatalf("stats after semantic update = %+v, want reset current state", stats)
+	}
+
+	processPostgresManualCheck(t, ctx, repo, monitor.ID, CheckRecord{
+		ID:         "semantic_new_target_failure",
+		MonitorID:  monitor.ID,
+		StatusCode: 500,
+		LatencyMS:  5,
+		Error:      "unexpected status code 500",
+		Success:    false,
+		CheckedAt:  time.Now().UTC(),
+	}, alertPolicy)
+	var newIncidentID string
+	var newFailureCount int
+	if err := repo.pool.QueryRow(ctx, `
+		SELECT id, failure_count
+		FROM incidents
+		WHERE monitor_id = $1 AND status = 'open'
+	`, monitor.ID).Scan(&newIncidentID, &newFailureCount); err != nil {
+		t.Fatal(err)
+	}
+	if newIncidentID == oldIncidentID || newFailureCount != 1 {
+		t.Fatalf("new incident = id:%s failures:%d, old=%s", newIncidentID, newFailureCount, oldIncidentID)
+	}
+	var alertCount int
+	if err := repo.pool.QueryRow(ctx, `SELECT count(*) FROM alert_outbox WHERE monitor_id = $1`, monitor.ID).Scan(&alertCount); err != nil {
+		t.Fatal(err)
+	}
+	if alertCount != 0 {
+		t.Fatalf("alerts after first new-target failure = %d, want 0", alertCount)
+	}
+
+	shorter, err := repo.Create(ctx, MonitorInput{
+		URL:             "https://interval-shorter.example.com",
+		IntervalSeconds: 86400,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.pool.Exec(ctx, `
+		UPDATE monitors
+		SET last_checked_at = clock_timestamp() - interval '31 seconds',
+			next_check_at = clock_timestamp() + interval '24 hours'
+		WHERE id = $1
+	`, shorter.ID); err != nil {
+		t.Fatal(err)
+	}
+	shortInterval := 30
+	shorter, err = repo.Update(ctx, shorter.ID, MonitorPatch{IntervalSeconds: &shortInterval})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbNow, err := databaseTime(ctx, repo.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shorter.NextCheckAt.After(dbNow) {
+		t.Fatalf("shortened interval next_check_at = %s, want due by %s", shorter.NextCheckAt, dbNow)
+	}
+	claimed, err := repo.ClaimDueJobs(ctx, 100, time.Minute, defaultMaxJobAttempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findClaimedJobID(claimed, shorter.ID) == "" {
+		t.Fatalf("shortened interval monitor was not claimed: %+v", claimed)
+	}
+
+	longer, err := repo.Create(ctx, MonitorInput{
+		URL:             "https://interval-longer.example.com",
+		IntervalSeconds: 30,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lastCheckedAt time.Time
+	if err := repo.pool.QueryRow(ctx, `
+		UPDATE monitors
+		SET last_checked_at = clock_timestamp(),
+			next_check_at = clock_timestamp() + interval '30 seconds'
+		WHERE id = $1
+		RETURNING last_checked_at
+	`, longer.ID).Scan(&lastCheckedAt); err != nil {
+		t.Fatal(err)
+	}
+	longInterval := 86400
+	longer, err = repo.Update(ctx, longer.ID, MonitorPatch{IntervalSeconds: &longInterval})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := lastCheckedAt.Add(24 * time.Hour); !longer.NextCheckAt.Equal(want) {
+		t.Fatalf("lengthened interval next_check_at = %s, want %s", longer.NextCheckAt, want)
 	}
 }
 

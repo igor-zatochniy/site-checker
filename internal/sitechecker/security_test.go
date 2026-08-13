@@ -57,6 +57,30 @@ func TestNetworkPolicyFiltersPrivateAddressesFromMultiAAnswer(t *testing.T) {
 	}
 }
 
+func TestNetworkPolicyFallsBackAfterPerAddressTimeout(t *testing.T) {
+	policy := NewNetworkPolicy(Config{AllowedPorts: map[int]struct{}{443: {}}})
+	policy.resolver = &sequenceIPResolver{answers: [][]netip.Addr{{
+		netip.MustParseAddr("93.184.216.34"),
+		netip.MustParseAddr("1.1.1.1"),
+	}}}
+	dialer := &timeoutThenSuccessDialer{}
+	policy.dialer = dialer
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	conn, err := policy.DialContext(ctx, "tcp", "multi-a.example:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+	if ctx.Err() != nil {
+		t.Fatalf("parent context expired before fallback succeeded: %v", ctx.Err())
+	}
+	if len(dialer.addresses) != 2 || dialer.addresses[1] != "1.1.1.1:443" {
+		t.Fatalf("dial attempts = %v, want timed-out first IP then healthy second IP", dialer.addresses)
+	}
+}
+
 func TestRedirectHostnameIsResolvedThroughSSRFPolicy(t *testing.T) {
 	policy := NewNetworkPolicy(Config{MaxRedirects: 3, AllowedPorts: map[int]struct{}{80: {}}})
 	policy.resolver = &sequenceIPResolver{answers: [][]netip.Addr{{netip.MustParseAddr("169.254.169.254")}}}
@@ -92,6 +116,21 @@ type recordingNetworkDialer struct {
 
 func (d *recordingNetworkDialer) DialContext(_ context.Context, _, address string) (net.Conn, error) {
 	d.address = address
+	client, server := net.Pipe()
+	_ = server.Close()
+	return client, nil
+}
+
+type timeoutThenSuccessDialer struct {
+	addresses []string
+}
+
+func (d *timeoutThenSuccessDialer) DialContext(ctx context.Context, _, address string) (net.Conn, error) {
+	d.addresses = append(d.addresses, address)
+	if len(d.addresses) == 1 {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	client, server := net.Pipe()
 	_ = server.Close()
 	return client, nil

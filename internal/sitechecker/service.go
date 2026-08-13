@@ -110,14 +110,15 @@ func (s *MonitorService) FailProcessing(ctx context.Context, lease ProcessingLea
 }
 
 func (s *MonitorService) StoreCheckResult(ctx context.Context, record CheckRecord, result CheckResult, lease ProcessingLease) error {
-	if _, err := s.repo.AddCheck(ctx, record, lease, s.alertPolicy); err != nil {
+	monitor, err := s.repo.AddCheck(ctx, record, lease, s.alertPolicy)
+	if err != nil {
 		if errors.Is(err, ErrDuplicateJob) {
 			return nil
 		}
 		return err
 	}
 
-	s.metrics.RecordResult(result)
+	s.metrics.RecordResult(result, monitor.LastCheckedAt)
 	return nil
 }
 

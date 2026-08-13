@@ -64,6 +64,14 @@ The included PostgreSQL and RabbitMQ manifests are suitable for local demonstrat
 
 The included `secret.example.yaml` uses local-demo placeholder values only. Production deployments should use External Secrets Operator, SOPS, Sealed Secrets, or a managed secret store.
 
+`ALLOW_PRIVATE_NETWORKS=true` alone does not override Kubernetes egress policy. To monitor a trusted private destination, edit the CIDR and ports in `../kubernetes-overlays/trusted-private-egress/trusted-private-egress.yaml`, then apply that overlay instead of the base:
+
+```bash
+kubectl apply -k deploy/kubernetes-overlays/trusted-private-egress/
+```
+
+Keep each `ipBlock` limited to the required destination range. The overlay enables application trust mode and adds matching egress only for Worker and Alert Dispatcher pods; it is intentionally not part of the default deployment.
+
 The base does not start the optional Alert Dispatcher. Set a non-empty `ALERT_WEBHOOK_URL` in the managed Secret before enabling it; the process intentionally fails startup when this required setting is missing. Then apply the optional deployment:
 
 ```bash

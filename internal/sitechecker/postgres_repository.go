@@ -172,10 +172,17 @@ func (r *PostgresMonitorRepository) Update(ctx context.Context, id string, patch
 	checkSemanticsChanged := updated.URL != current.URL ||
 		updated.TimeoutSeconds != current.TimeoutSeconds ||
 		updated.ExpectedStatus != current.ExpectedStatus
+	intervalChanged := updated.IntervalSeconds != current.IntervalSeconds
+	enabledChanged := updated.Enabled != current.Enabled
 	updated.UpdatedAt = now
 	if updated.Enabled {
 		updated.Status = monitorStatusActive
-		if checkSemanticsChanged || updated.NextCheckAt.IsZero() || updated.NextCheckAt.Before(now) {
+		switch {
+		case checkSemanticsChanged || (enabledChanged && !current.Enabled):
+			updated.NextCheckAt = now
+		case intervalChanged:
+			updated.NextCheckAt = nextCheckAfterIntervalChange(current.LastCheckedAt, now, updated.IntervalSeconds)
+		case updated.NextCheckAt.IsZero() || updated.NextCheckAt.Before(now):
 			updated.NextCheckAt = now
 		}
 	} else {
@@ -212,6 +219,18 @@ func (r *PostgresMonitorRepository) Update(ctx context.Context, id string, patch
 	}
 	if err != nil {
 		return Monitor{}, err
+	}
+	if checkSemanticsChanged {
+		if _, err := tx.Exec(ctx, `
+			UPDATE incidents
+			SET status = $2,
+				resolved_at = $3::timestamptz,
+				updated_at = $3::timestamptz
+			WHERE monitor_id = $1
+				AND status = $4
+		`, id, incidentStatusResolved, now, incidentStatusOpen); err != nil {
+			return Monitor{}, err
+		}
 	}
 	if !updated.Enabled || checkSemanticsChanged {
 		jobError := "monitor configuration changed"

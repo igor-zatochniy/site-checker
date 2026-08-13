@@ -104,7 +104,7 @@ func (s *AlertSender) Send(ctx context.Context, event AlertOutboxEvent) error {
 		return &AlertDeliveryError{
 			StatusCode: resp.StatusCode,
 			Permanent:  isPermanentAlertStatus(resp.StatusCode),
-			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), resp.Header.Get("Date")),
 		}
 	}
 	return nil
@@ -122,7 +122,7 @@ func isPermanentAlertStatus(statusCode int) bool {
 	}
 }
 
-func parseRetryAfter(value string, now time.Time) time.Duration {
+func parseRetryAfter(value, responseDate string) time.Duration {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return 0
@@ -137,10 +137,14 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 		return time.Duration(seconds) * time.Second
 	}
 	retryAt, err := http.ParseTime(value)
-	if err != nil || !retryAt.After(now) {
+	if err != nil {
 		return 0
 	}
-	delay := retryAt.Sub(now)
+	serverTime, err := http.ParseTime(responseDate)
+	if err != nil || !retryAt.After(serverTime) {
+		return 0
+	}
+	delay := retryAt.Sub(serverTime)
 	if delay > maxAlertRetryAfter {
 		return maxAlertRetryAfter
 	}

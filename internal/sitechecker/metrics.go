@@ -127,12 +127,15 @@ func (m *Metrics) SetDependencyUp(name string, up bool) {
 	m.dependencyUp[name] = up
 }
 
-func (m *Metrics) RecordResult(result CheckResult) {
+func (m *Metrics) RecordResult(result CheckResult, recordedAt time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if recordedAt.IsZero() {
+		recordedAt = time.Now().UTC()
+	}
 
 	m.checksTotal++
-	m.lastCheckAt = result.CheckedAt
+	m.lastCheckAt = recordedAt.UTC()
 	m.durationSumSeconds += result.Duration.Seconds()
 	m.durationCount++
 	if result.MonitorID != "" {
@@ -143,7 +146,7 @@ func (m *Metrics) RecordResult(result CheckResult) {
 
 	if result.Healthy {
 		m.healthyTotal++
-		m.lastSuccessAt = result.CheckedAt
+		m.lastSuccessAt = recordedAt.UTC()
 		if result.MonitorID != "" {
 			m.consecutiveFailures[result.MonitorID] = 0
 		}

@@ -106,6 +106,156 @@ func TestMonitorStoreRejectsResultAfterCheckConfigurationChanges(t *testing.T) {
 	}
 }
 
+func TestMonitorStoreResolvesIncidentWhenCheckSemanticsChange(t *testing.T) {
+	cfg := testCheckerConfig(t)
+	cfg.AllowedPorts = map[int]struct{}{443: {}}
+	store := NewMonitorStore(NewNetworkPolicy(cfg))
+	monitor, err := store.Create(MonitorInput{
+		URL:             "https://a.example",
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for index := range 2 {
+		addStoreManualCheck(t, store, monitor.ID, CheckRecord{
+			ID:         fmt.Sprintf("semantic_failure_%d", index),
+			MonitorID:  monitor.ID,
+			StatusCode: 500,
+			Error:      "unexpected status code 500",
+			Success:    false,
+			CheckedAt:  time.Now().UTC(),
+		})
+	}
+	open, total := store.ListIncidents(incidentStatusOpen, 0, 10)
+	if total != 1 || len(open) != 1 || open[0].FailureCount != 2 {
+		t.Fatalf("open incidents before update = %+v total=%d", open, total)
+	}
+	oldIncidentID := open[0].ID
+
+	newURL := "https://b.example"
+	if _, err := store.Update(monitor.ID, MonitorPatch{URL: &newURL}); err != nil {
+		t.Fatal(err)
+	}
+	if open, total = store.ListIncidents(incidentStatusOpen, 0, 10); total != 0 || len(open) != 0 {
+		t.Fatalf("open incidents after semantic update = %+v total=%d, want none", open, total)
+	}
+	stats, err := store.Stats(monitor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ConsecutiveFailure != 0 {
+		t.Fatalf("consecutive failures after semantic update = %d, want 0", stats.ConsecutiveFailure)
+	}
+
+	addStoreManualCheck(t, store, monitor.ID, CheckRecord{
+		ID:         "new_semantic_failure",
+		MonitorID:  monitor.ID,
+		StatusCode: 500,
+		Error:      "unexpected status code 500",
+		Success:    false,
+		CheckedAt:  time.Now().UTC(),
+	})
+	open, total = store.ListIncidents(incidentStatusOpen, 0, 10)
+	if total != 1 || len(open) != 1 || open[0].ID == oldIncidentID || open[0].FailureCount != 1 {
+		t.Fatalf("open incident after new-target failure = %+v total=%d", open, total)
+	}
+}
+
+func TestMonitorStoreRecalculatesScheduleWhenIntervalChanges(t *testing.T) {
+	cfg := testCheckerConfig(t)
+	cfg.AllowedPorts = map[int]struct{}{443: {}}
+	store := NewMonitorStore(NewNetworkPolicy(cfg))
+	monitor, err := store.Create(MonitorInput{
+		URL:             "https://interval-shorter.example",
+		IntervalSeconds: 86400,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	store.mu.Lock()
+	stored := store.byID[monitor.ID]
+	stored.LastCheckedAt = now.Add(-time.Minute)
+	stored.NextCheckAt = now.Add(24 * time.Hour)
+	store.byID[monitor.ID] = stored
+	store.mu.Unlock()
+
+	shortInterval := 30
+	updated, err := store.Update(monitor.ID, MonitorPatch{IntervalSeconds: &shortInterval})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.NextCheckAt.After(time.Now().UTC().Add(time.Second)) {
+		t.Fatalf("shortened interval next_check_at = %s, want due now", updated.NextCheckAt)
+	}
+	jobs := store.ClaimDueJobs(10, time.Now().UTC().Add(time.Second), time.Minute)
+	found := false
+	for _, job := range jobs {
+		if job.MonitorID == monitor.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("shortened interval did not produce a due job: %+v", jobs)
+	}
+
+	longMonitor, err := store.Create(MonitorInput{
+		URL:             "https://interval-longer.example",
+		IntervalSeconds: 30,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastCheckedAt := time.Now().UTC()
+	store.mu.Lock()
+	stored = store.byID[longMonitor.ID]
+	stored.LastCheckedAt = lastCheckedAt
+	stored.NextCheckAt = lastCheckedAt.Add(30 * time.Second)
+	store.byID[longMonitor.ID] = stored
+	store.mu.Unlock()
+
+	longInterval := 86400
+	updated, err = store.Update(longMonitor.ID, MonitorPatch{IntervalSeconds: &longInterval})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := lastCheckedAt.Add(24 * time.Hour); !updated.NextCheckAt.Equal(want) {
+		t.Fatalf("lengthened interval next_check_at = %s, want %s", updated.NextCheckAt, want)
+	}
+}
+
+func addStoreManualCheck(t *testing.T, store *MonitorStore, monitorID string, record CheckRecord) {
+	t.Helper()
+	now := time.Now().UTC()
+	job, created, err := store.CreateManualJob(monitorID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Fatal("manual job was unexpectedly deduplicated")
+	}
+	if err := store.MarkJobPublished(monitorID, job.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := store.MarkJobProcessing(monitorID, job.ID, 1, now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.JobID = job.ID
+	if _, err := store.AddCheck(record, lease); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMonitorStoreReclaimsStaleScheduledJob(t *testing.T) {
 	cfg := testCheckerConfig(t)
 	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}
