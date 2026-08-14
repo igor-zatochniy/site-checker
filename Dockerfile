@@ -1,10 +1,12 @@
 # syntax=docker/dockerfile:1.7
 
-ARG GO_VERSION=1.26.5
+ARG GO_VERSION=1.26.6
 ARG ALPINE_VERSION=3.24
+ARG GO_IMAGE_DIGEST=sha256:af8d6740070b8906d12eae1c3e3ea0957fb63f492051ea05e354c38ef9fe88df
+ARG ALPINE_IMAGE_DIGEST=sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 # --- Stage 1: Builder ---
-FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
+FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION}@${GO_IMAGE_DIGEST} AS builder
 
 WORKDIR /src
 
@@ -26,7 +28,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -o /out/site-checker .
 
 # --- Stage 2: Production Image ---
-FROM alpine:${ALPINE_VERSION}
+FROM alpine:${ALPINE_VERSION}@${ALPINE_IMAGE_DIGEST}
 
 RUN apk --no-cache add ca-certificates
 

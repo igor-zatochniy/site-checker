@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.26.5"
+  GO_VERSION: "1.26.6"
   STATICCHECK_VERSION: "v0.7.0"
   GOVULNCHECK_VERSION: "v1.6.0"
 
@@ -32,6 +32,12 @@ jobs:
 
       - name: Download modules
         run: go mod download
+
+      - name: Verify module integrity
+        run: go mod verify
+
+      - name: Verify module files are tidy
+        run: go mod tidy -diff
 
       - name: Run tests with race detector
         run: go test -race ./...

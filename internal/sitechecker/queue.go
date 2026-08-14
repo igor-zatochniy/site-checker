@@ -311,8 +311,14 @@ func (q *RabbitMQQueue) Ping(ctx context.Context) error {
 		return err
 	}
 	defer channel.Close()
-	_, err = channel.QueueDeclarePassive(q.queueName, true, false, false, false, nil)
-	return err
+	if _, err = channel.QueueDeclarePassive(q.queueName, true, false, false, false, nil); err == nil {
+		return nil
+	}
+	passiveErr := err
+	if err := q.repairTopology(ctx); err != nil {
+		return errors.Join(passiveErr, fmt.Errorf("repair rabbitmq topology: %w", err))
+	}
+	return nil
 }
 
 func (q *RabbitMQQueue) declareTopology(channel *amqp.Channel) error {
@@ -342,6 +348,34 @@ func (q *RabbitMQQueue) declareTopology(channel *amqp.Channel) error {
 	return err
 }
 
+func (q *RabbitMQQueue) repairTopology(ctx context.Context) error {
+	if err := q.acquireReconnect(ctx); err != nil {
+		return err
+	}
+	defer q.releaseReconnect()
+	if q.isClosed() {
+		return context.Canceled
+	}
+
+	conn := q.connection()
+	if conn == nil || conn.IsClosed() {
+		return ErrQueueConsumerClosed
+	}
+	channel, err := conn.Channel()
+	if err != nil {
+		q.invalidateConnection(conn)
+		return err
+	}
+	defer channel.Close()
+	if err := q.declareTopology(channel); err != nil {
+		if conn.IsClosed() {
+			q.invalidateConnection(conn)
+		}
+		return err
+	}
+	return nil
+}
+
 func (q *RabbitMQQueue) Publish(ctx context.Context, job CheckJobMessage) error {
 	if job.JobID == "" {
 		job.JobID = NewCheckJobID(job.MonitorID, job.EnqueuedAt)
@@ -359,6 +393,7 @@ func (q *RabbitMQQueue) Publish(ctx context.Context, job CheckJobMessage) error 
 	}
 	publishCtx, cancel := context.WithTimeout(ctx, q.publishTimeout)
 	defer cancel()
+	topologyRepaired := false
 
 	for attempt := 1; ; attempt++ {
 		if err := q.ensureConnected(publishCtx); err != nil {
@@ -385,7 +420,16 @@ func (q *RabbitMQQueue) Publish(ctx context.Context, job CheckJobMessage) error 
 			return nil
 		}
 		if errors.Is(err, ErrRabbitMQReturned) {
-			return err
+			if topologyRepaired {
+				return err
+			}
+			if repairErr := q.repairTopology(publishCtx); repairErr == nil {
+				topologyRepaired = true
+				slog.Warn("RabbitMQ topology restored after unroutable publish", "job_id", job.JobID)
+				continue
+			} else {
+				err = errors.Join(err, fmt.Errorf("repair rabbitmq topology: %w", repairErr))
+			}
 		}
 		q.invalidatePublishChannel(session.channel)
 		if publishCtx.Err() != nil {
@@ -498,6 +542,9 @@ func (q *RabbitMQQueue) consumeSession(ctx context.Context, deliveries chan<- Qu
 		return err
 	}
 	defer channel.Close()
+	if err := q.declareTopology(channel); err != nil {
+		return fmt.Errorf("declare rabbitmq consumer topology: %w", err)
+	}
 	if err := channel.Qos(q.prefetch, 0, false); err != nil {
 		return err
 	}
@@ -506,6 +553,7 @@ func (q *RabbitMQQueue) consumeSession(ctx context.Context, deliveries chan<- Qu
 		return err
 	}
 	channelClosed := channel.NotifyClose(make(chan *amqp.Error, 1))
+	consumerCanceled := channel.NotifyCancel(make(chan string, 1))
 
 	for {
 		select {
@@ -518,6 +566,11 @@ func (q *RabbitMQQueue) consumeSession(ctx context.Context, deliveries chan<- Qu
 				return fmt.Errorf("rabbitmq consumer channel closed: %w", closeErr)
 			}
 			return ErrQueueConsumerClosed
+		case consumerTag, ok := <-consumerCanceled:
+			if !ok {
+				return ErrQueueConsumerClosed
+			}
+			return fmt.Errorf("rabbitmq consumer %q was canceled", consumerTag)
 		case delivery, ok := <-rawDeliveries:
 			if !ok {
 				return ErrQueueConsumerClosed

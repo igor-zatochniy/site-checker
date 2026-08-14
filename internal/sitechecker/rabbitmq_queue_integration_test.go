@@ -4,12 +4,12 @@ package sitechecker
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"testing"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -149,6 +149,62 @@ func TestRabbitMQQueueRetriesAndDeadLetters(t *testing.T) {
 	if err := restarted.Ack(brokerRestartCtx); err != nil {
 		t.Fatalf("ack after RabbitMQ restart: %v", err)
 	}
+
+	queue.mu.RLock()
+	connectionBeforeDelete := queue.conn
+	queue.mu.RUnlock()
+	if connectionBeforeDelete == nil || connectionBeforeDelete.IsClosed() {
+		t.Fatal("RabbitMQ connection is not available before topology recovery test")
+	}
+	adminConnection, err := amqp.Dial(queue.url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminChannel, err := adminConnection.Channel()
+	if err != nil {
+		_ = adminConnection.Close()
+		t.Fatal(err)
+	}
+	if _, err := adminChannel.QueueDelete(queue.dlqName, false, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminChannel.QueueDelete(queue.queueName, false, false, false); err != nil {
+		t.Fatal(err)
+	}
+	_ = adminChannel.Close()
+	_ = adminConnection.Close()
+
+	topologyCtx, topologyCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer topologyCancel()
+	topologyJob := CheckJobMessage{
+		JobID:      "job_integration_topology_recovery",
+		MonitorID:  "mon_integration",
+		Attempt:    2,
+		EnqueuedAt: time.Now().UTC(),
+	}
+	if err := queue.Publish(topologyCtx, topologyJob); err != nil {
+		t.Fatalf("publish after queue deletion: %v", err)
+	}
+	restored := receiveRabbitDelivery(t, deliveries)
+	if restored.Job.JobID != topologyJob.JobID {
+		t.Fatalf("job after topology recovery = %q, want %q", restored.Job.JobID, topologyJob.JobID)
+	}
+	if err := restored.Nack(topologyCtx, false); err != nil {
+		t.Fatalf("dead-letter after topology recovery: %v", err)
+	}
+	restoredDeadLetter := receiveRabbitDeadLetter(t, topologyCtx, queue)
+	if restoredDeadLetter.JobID != topologyJob.JobID {
+		t.Fatalf("dead-letter after topology recovery = %q, want %q", restoredDeadLetter.JobID, topologyJob.JobID)
+	}
+	if err := queue.Ping(topologyCtx); err != nil {
+		t.Fatalf("ping after topology recovery: %v", err)
+	}
+	queue.mu.RLock()
+	connectionAfterDelete := queue.conn
+	queue.mu.RUnlock()
+	if connectionAfterDelete != connectionBeforeDelete || connectionAfterDelete.IsClosed() {
+		t.Fatal("topology recovery unnecessarily replaced the live RabbitMQ connection")
+	}
 }
 
 func execRabbitMQControl(t *testing.T, ctx context.Context, container testcontainers.Container, command string) {
@@ -166,7 +222,7 @@ func execRabbitMQControl(t *testing.T, ctx context.Context, container testcontai
 	}
 }
 
-func TestRabbitMQQueueReturnsUnroutablePublish(t *testing.T) {
+func TestRabbitMQQueueRepairsUnroutablePublish(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
@@ -208,14 +264,25 @@ func TestRabbitMQQueueReturnsUnroutablePublish(t *testing.T) {
 	defer queue.Close()
 
 	queue.queueName = "site_checker.integration.unroutable.missing"
-	err = queue.Publish(ctx, CheckJobMessage{
+	job := CheckJobMessage{
 		JobID:      "job_integration_unroutable",
 		MonitorID:  "mon_integration",
 		Attempt:    1,
 		EnqueuedAt: time.Now().UTC(),
-	})
-	if !errors.Is(err, ErrRabbitMQReturned) {
-		t.Fatalf("publish error = %v, want ErrRabbitMQReturned", err)
+	}
+	if err := queue.Publish(ctx, job); err != nil {
+		t.Fatalf("publish did not repair missing expected queue: %v", err)
+	}
+	deliveries, _, err := queue.Consume(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery := receiveRabbitDelivery(t, deliveries)
+	if delivery.Job.JobID != job.JobID {
+		t.Fatalf("repaired queue job_id = %q, want %q", delivery.Job.JobID, job.JobID)
+	}
+	if err := delivery.Ack(ctx); err != nil {
+		t.Fatal(err)
 	}
 }
 
