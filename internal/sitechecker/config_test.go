@@ -2,6 +2,7 @@ package sitechecker
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -141,6 +142,79 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if _, ok := cfg.AllowedPorts[443]; !ok {
 		t.Fatalf("port 443 is not allowed by default")
+	}
+}
+
+func TestLoadConfigValidatesAppEnvironment(t *testing.T) {
+	for _, appEnv := range []string{"production", "local", "development", "demo"} {
+		t.Run(appEnv, func(t *testing.T) {
+			cleanConfigEnv(t)
+			t.Setenv("APP_ENV", appEnv)
+			t.Setenv("APP_ROLE", "api")
+			t.Setenv("STORAGE_TYPE", "postgres")
+			t.Setenv("DATABASE_URL", "postgres://user:pass@example.com:5432/site_checker")
+
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatalf("LoadConfig returned error for APP_ENV=%s: %v", appEnv, err)
+			}
+			if cfg.AppEnv != appEnv {
+				t.Fatalf("AppEnv = %q, want %q", cfg.AppEnv, appEnv)
+			}
+		})
+	}
+
+	t.Run("unknown", func(t *testing.T) {
+		cleanConfigEnv(t)
+		t.Setenv("APP_ENV", "prod")
+
+		_, err := LoadConfig()
+		if err == nil {
+			t.Fatal("LoadConfig returned nil error for an unknown APP_ENV")
+		}
+		if !strings.Contains(err.Error(), "APP_ENV") {
+			t.Fatalf("error = %q, want APP_ENV validation context", err)
+		}
+	})
+}
+
+func TestLoadConfigRequiresHealthAddressForAPIEnabledRoles(t *testing.T) {
+	for _, role := range []string{"all", "api"} {
+		t.Run(role, func(t *testing.T) {
+			cleanConfigEnv(t)
+			t.Setenv("APP_ROLE", role)
+			t.Setenv("HEALTH_ADDR", "")
+			if role == "api" {
+				t.Setenv("STORAGE_TYPE", "postgres")
+				t.Setenv("DATABASE_URL", "postgres://user:pass@example.com:5432/site_checker")
+			}
+
+			_, err := LoadConfig()
+			if err == nil {
+				t.Fatalf("LoadConfig returned nil error for APP_ROLE=%s with empty HEALTH_ADDR", role)
+			}
+			if !strings.Contains(err.Error(), "HEALTH_ADDR") {
+				t.Fatalf("error = %q, want HEALTH_ADDR validation context", err)
+			}
+		})
+	}
+}
+
+func TestLoadConfigAllowsEmptyHealthAddressForBackgroundRoles(t *testing.T) {
+	for _, role := range []string{"scheduler", "worker"} {
+		t.Run(role, func(t *testing.T) {
+			cleanConfigEnv(t)
+			t.Setenv("APP_ROLE", role)
+			t.Setenv("HEALTH_ADDR", "")
+			t.Setenv("STORAGE_TYPE", "postgres")
+			t.Setenv("DATABASE_URL", "postgres://user:pass@example.com:5432/site_checker")
+			t.Setenv("QUEUE_TYPE", "rabbitmq")
+			t.Setenv("RABBITMQ_URL", "amqp://user:pass@example.com:5672/")
+
+			if _, err := LoadConfig(); err != nil {
+				t.Fatalf("LoadConfig returned error for APP_ROLE=%s without HTTP listener: %v", role, err)
+			}
+		})
 	}
 }
 

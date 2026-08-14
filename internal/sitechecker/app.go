@@ -2,48 +2,50 @@ package sitechecker
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 )
 
-func Main(version, commit, buildDate string) {
+func Main(version, commit, buildDate string) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	return runApplication(signalCtx, version, commit, buildDate, logger)
+}
 
+func runApplication(parentCtx context.Context, version, commit, buildDate string, logger *slog.Logger) error {
 	cfg, err := LoadConfig()
 	if err != nil {
-		logger.Error("Invalid configuration", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
 	policy := NewNetworkPolicy(cfg)
 	if cfg.AlertWebhookURL != "" {
 		if err := policy.ValidateURL(cfg.AlertWebhookURL); err != nil {
-			logger.Error("Invalid alert webhook URL", "error", err)
-			os.Exit(1)
+			return fmt.Errorf("invalid alert webhook URL: %w", err)
 		}
 	}
 
-	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
-	ctx, cancel := context.WithCancel(signalCtx)
+	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
 	seedLinks := []string{}
 	if roleEnabled(cfg.AppRole, "scheduler") {
 		seedLinks, err = LoadSeedLinks(cfg)
 		if err != nil {
-			logger.Error("Failed to load seed links", "error", err)
-			os.Exit(1)
+			return fmt.Errorf("load seed links: %w", err)
 		}
 		if len(seedLinks) > 0 {
 			if err := ValidateLinks(seedLinks, policy); err != nil {
-				logger.Error("Invalid seed link configuration", "error", err)
-				os.Exit(1)
+				return fmt.Errorf("invalid seed link configuration: %w", err)
 			}
 		}
 	}
@@ -51,14 +53,12 @@ func Main(version, commit, buildDate string) {
 	metrics := NewMetrics(version, commit, buildDate, 0)
 	repo, closeRepo, err := NewConfiguredRepository(ctx, cfg, policy, logger)
 	if err != nil {
-		logger.Error("Failed to initialize repository", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("initialize repository: %w", err)
 	}
 	defer closeRepo()
 	if len(seedLinks) > 0 {
 		if err := SeedRepository(ctx, repo, seedLinks, cfg); err != nil {
-			logger.Error("Failed to seed monitors", "error", err)
-			os.Exit(1)
+			return fmt.Errorf("seed monitors: %w", err)
 		}
 		logger.Info("Seeded configured monitors", "count", len(seedLinks))
 	} else if roleEnabled(cfg.AppRole, "scheduler") {
@@ -80,8 +80,7 @@ func Main(version, commit, buildDate string) {
 		var ok bool
 		retentionRepo, ok = repo.(RetentionRepository)
 		if !ok {
-			logger.Error("Configured repository does not support data retention")
-			os.Exit(1)
+			return errors.New("configured repository does not support data retention")
 		}
 	}
 
@@ -93,8 +92,7 @@ func Main(version, commit, buildDate string) {
 		var ok bool
 		alertRepo, ok = repo.(AlertOutboxRepository)
 		if !ok {
-			logger.Error("Configured repository does not support persisted alert delivery")
-			os.Exit(1)
+			return errors.New("configured repository does not support persisted alert delivery")
 		}
 		alertClient := &http.Client{
 			Transport:     NewSecureTransport(cfg, policy),
@@ -108,19 +106,35 @@ func Main(version, commit, buildDate string) {
 	if roleEnabled(cfg.AppRole, "scheduler") || roleEnabled(cfg.AppRole, "worker") {
 		queue, err = NewConfiguredQueue(cfg)
 		if err != nil {
-			logger.Error("Failed to initialize queue", "error", err)
-			os.Exit(1)
+			return fmt.Errorf("initialize queue: %w", err)
 		}
 		defer queue.Close()
 	}
 
 	var wg sync.WaitGroup
+	fatalErrors := make(chan error, 1)
+	reportFatal := func(err error) {
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		select {
+		case fatalErrors <- err:
+		default:
+		}
+		cancel()
+	}
 	if cfg.HealthAddr != "" {
-		_, httpDone := RunHTTPServer(ctx, cfg, metrics, api, roleEnabled(cfg.AppRole, "api"), BuildReadinessDependencies(cfg, repo, queue), logger, cancel)
+		_, httpDone, err := RunHTTPServer(ctx, cfg, metrics, api, roleEnabled(cfg.AppRole, "api"), BuildReadinessDependencies(cfg, repo, queue), logger)
+		if err != nil {
+			return fmt.Errorf("start HTTP server: %w", err)
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			<-httpDone
+			if err := <-httpDone; err != nil {
+				logger.Error("HTTP server stopped unexpectedly", "error", err)
+				reportFatal(err)
+			}
 		}()
 	}
 
@@ -151,9 +165,9 @@ func Main(version, commit, buildDate string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := RunQueueWorkers(ctx, service, queue, cfg.WorkerCount, cfg.CheckLeaseTimeout, logger); err != nil && ctx.Err() == nil {
+			if err := runWorkerComponent(ctx, service, queue, cfg.WorkerCount, cfg.CheckLeaseTimeout, logger); err != nil {
 				logger.Error("Workers stopped unexpectedly", "error", err)
-				cancel()
+				reportFatal(err)
 			}
 		}()
 	}
@@ -172,7 +186,24 @@ func Main(version, commit, buildDate string) {
 		}()
 	}
 
-	<-ctx.Done()
+	var runtimeErr error
+	select {
+	case <-parentCtx.Done():
+	case runtimeErr = <-fatalErrors:
+	}
+	cancel()
 	wg.Wait()
+	if runtimeErr != nil {
+		return runtimeErr
+	}
 	logger.Info("Site Checker stopped gracefully")
+	return nil
+}
+
+func runWorkerComponent(ctx context.Context, service *MonitorService, queue JobQueue, workerCount int, leaseTimeout time.Duration, logger *slog.Logger) error {
+	err := RunQueueWorkers(ctx, service, queue, workerCount, leaseTimeout, logger)
+	if err == nil || ctx.Err() != nil {
+		return nil
+	}
+	return fmt.Errorf("queue workers stopped: %w", err)
 }

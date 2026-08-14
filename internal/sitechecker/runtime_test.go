@@ -82,7 +82,7 @@ func TestRunHTTPServerDoneWaitsForShutdown(t *testing.T) {
 	releaseCheck := make(chan struct{})
 	var startedOnce sync.Once
 
-	server, done := RunHTTPServer(ctx, cfg, metrics, nil, false, []ReadinessDependency{
+	server, done, err := RunHTTPServer(ctx, cfg, metrics, nil, false, []ReadinessDependency{
 		{
 			Name: "slow",
 			Check: func(context.Context) error {
@@ -91,7 +91,10 @@ func TestRunHTTPServerDoneWaitsForShutdown(t *testing.T) {
 				return nil
 			},
 		},
-	}, logger, cancel)
+	}, logger)
+	if err != nil {
+		t.Fatalf("RunHTTPServer returned error: %v", err)
+	}
 	if server == nil {
 		t.Fatal("HTTP server did not start")
 	}
@@ -120,19 +123,103 @@ func TestRunHTTPServerDoneWaitsForShutdown(t *testing.T) {
 
 	cancel()
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("HTTP server stopped with error: %v", err)
+		}
 		t.Fatal("HTTP server reported done before active request completed")
 	case <-time.After(100 * time.Millisecond):
 	}
 
 	close(releaseCheck)
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("HTTP server stopped with error: %v", err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("HTTP server did not finish shutdown after active request completed")
 	}
 	if err := <-requestDone; err != nil {
 		t.Fatalf("readiness request error: %v", err)
+	}
+}
+
+func TestRunHTTPServerReturnsListenerFailure(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	cfg := testCheckerConfig(t)
+	cfg.HealthAddr = listener.Addr().String()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server, done, err := RunHTTPServer(context.Background(), cfg, NewMetrics("test", "commit", "date", 0), nil, false, nil, logger)
+	if err == nil {
+		t.Fatal("RunHTTPServer returned nil error for an occupied listener")
+	}
+	if server != nil || done != nil {
+		t.Fatal("RunHTTPServer returned runtime handles after listener failure")
+	}
+	if !strings.Contains(err.Error(), "listen") {
+		t.Fatalf("error = %q, want listener context", err)
+	}
+}
+
+func TestRunApplicationReturnsListenerFailure(t *testing.T) {
+	cleanConfigEnv(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	t.Setenv("HEALTH_ADDR", listener.Addr().String())
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	err = runApplication(context.Background(), "test", "commit", "date", logger)
+	if err == nil {
+		t.Fatal("runApplication returned nil error for an occupied listener")
+	}
+	if !strings.Contains(err.Error(), "start HTTP server") {
+		t.Fatalf("error = %q, want startup context", err)
+	}
+}
+
+func TestRunApplicationReturnsNilAfterGracefulCancellation(t *testing.T) {
+	cleanConfigEnv(t)
+	t.Setenv("HEALTH_ADDR", "127.0.0.1:0")
+	ctx, cancel := context.WithCancel(context.Background())
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	done := make(chan error, 1)
+	go func() {
+		done <- runApplication(ctx, "test", "commit", "date", logger)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runApplication returned error after graceful cancellation: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runApplication did not finish after graceful cancellation")
+	}
+}
+
+func TestRunWorkerComponentReturnsFatalConsumerError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	queueErr := errors.New("rabbitmq consumer failed")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	err := runWorkerComponent(ctx, nil, newStoppedConsumerQueue(queueErr), 1, time.Minute, logger)
+	if err == nil {
+		t.Fatal("runWorkerComponent returned nil error for a failed consumer")
+	}
+	if !errors.Is(err, queueErr) {
+		t.Fatalf("error does not wrap consumer failure: %v", err)
 	}
 }
 

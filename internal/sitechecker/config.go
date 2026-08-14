@@ -114,7 +114,7 @@ func LoadConfig() (Config, error) {
 	var errs []error
 	cfg := Config{}
 
-	cfg.AppEnv = strings.ToLower(envString("APP_ENV", "production"))
+	cfg.AppEnv = envEnum("APP_ENV", "production", []string{"production", "local", "development", "demo"}, &errs)
 	cfg.AppRole = envEnum("APP_ROLE", defaultAppRole, []string{"all", "api", "scheduler", "worker", "alert-dispatcher"}, &errs)
 	cfg.DatabaseURL = envString("DATABASE_URL", "")
 	cfg.StorageType = envString("STORAGE_TYPE", "")
@@ -217,6 +217,9 @@ func LoadConfig() (Config, error) {
 		errs = append(errs, errors.New("USER_AGENT must not be empty"))
 	}
 	apiEnabled := cfg.AppRole == "all" || cfg.AppRole == "api"
+	if apiEnabled && cfg.HealthAddr == "" {
+		errs = append(errs, errors.New("HEALTH_ADDR must not be empty for API-enabled roles"))
+	}
 	if cfg.AuthDisabled {
 		switch cfg.AppEnv {
 		case "local", "development", "demo":

@@ -60,9 +60,9 @@ func RunHTTPServer(
 	enableAPI bool,
 	dependencies []ReadinessDependency,
 	logger *slog.Logger,
-	cancel context.CancelFunc,
-) (*http.Server, <-chan struct{}) {
-	done := make(chan struct{})
+) (*http.Server, <-chan error, error) {
+	done := make(chan error, 1)
+	serveResult := make(chan error, 1)
 	registrars := []func(*http.ServeMux){RegisterOpenAPI}
 	if enableAPI && api != nil {
 		registrars = append([]func(*http.ServeMux){api.Register}, registrars...)
@@ -71,34 +71,41 @@ func RunHTTPServer(
 	server := NewObservabilityServerWithDependencies(cfg.HealthAddr, cfg, metrics, dependencies, registrars...)
 	listener, err := net.Listen("tcp", cfg.HealthAddr)
 	if err != nil {
-		logger.Error("Failed to start API server", "addr", cfg.HealthAddr, "error", err)
-		close(done)
-		cancel()
-		return nil, done
+		return nil, nil, fmt.Errorf("listen on %s: %w", cfg.HealthAddr, err)
 	}
 	server.Addr = listener.Addr().String()
 
-	serveDone := make(chan struct{})
 	go func() {
-		defer close(serveDone)
 		logger.Info("HTTP server started", "addr", server.Addr, "api_enabled", enableAPI)
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("API server stopped unexpectedly", "error", err)
-			cancel()
+		err := server.Serve(listener)
+		if errors.Is(err, http.ErrServerClosed) {
+			serveResult <- nil
+			return
 		}
+		if err == nil {
+			err = errors.New("HTTP server stopped without an error")
+		}
+		serveResult <- fmt.Errorf("serve HTTP: %w", err)
 	}()
 
 	go func() {
 		defer close(done)
-		<-ctx.Done()
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			logger.Warn("API server shutdown timed out", "error", err)
+		select {
+		case err := <-serveResult:
+			done <- err
+		case <-ctx.Done():
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutdownCancel()
+			if err := server.Shutdown(shutdownCtx); err != nil {
+				logger.Warn("API server shutdown timed out", "error", err)
+				if closeErr := server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+					logger.Warn("Failed to force-close API server", "error", closeErr)
+				}
+			}
+			done <- <-serveResult
 		}
-		<-serveDone
 	}()
-	return server, done
+	return server, done, nil
 }
 
 func RunQueueScheduler(ctx context.Context, service *MonitorService, queue JobQueue, cfg Config, logger *slog.Logger) {

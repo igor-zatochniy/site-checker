@@ -314,7 +314,7 @@ Expected demonstration:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `APP_ENV` | `production` | Runtime environment label. `demo` enables built-in demo seed links. |
+| `APP_ENV` | `production` | Strict runtime environment: `production`, `local`, `development`, or `demo`. Unknown values fail startup; `demo` enables built-in demo seed links. |
 | `APP_ROLE` | `all` | Runtime role: `all`, `api`, `scheduler`, `worker`, or `alert-dispatcher`. |
 | `STORAGE_TYPE` | `memory` or `postgres` when `DATABASE_URL` is set | Storage backend. Production and split `api`/`scheduler`/`worker` roles require PostgreSQL. |
 | `DATABASE_URL` | empty | PostgreSQL connection string. Required for `STORAGE_TYPE=postgres`. |
@@ -337,7 +337,7 @@ Expected demonstration:
 | `CHECK_LEASE_TIMEOUT` | `2m` | Bounds publication, queued-delivery, and processing recovery leases. It must be at least 90 seconds: the maximum 60-second monitor timeout plus a 30-second persistence margin. |
 | `CHECK_INTERVAL` | `5m` | Default interval for seeded monitors. |
 | `HTTP_TIMEOUT` | `5s` | Default `timeout_seconds` for seeded monitors. Each monitor context owns its actual timeout; this value is not a global client cap. |
-| `HEALTH_ADDR` | `:8080` | Address for REST, health, and metrics endpoints. |
+| `HEALTH_ADDR` | `:8080` | Address for REST, health, and metrics endpoints. Must not be empty for `api` and `all` roles. |
 | `SEED_URLS_FILE` | empty | Explicit path to a newline file or JSON array with seed URLs. Only `all` and `scheduler` roles seed monitors. |
 | `SEED_DEFAULT_LINKS` | `false` | Enables built-in demo seed links. Keep disabled for normal deployments. |
 | `URLS_FILE` | empty | Legacy alias for `SEED_URLS_FILE` when `SEED_URLS_FILE` is unset. |
