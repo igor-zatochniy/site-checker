@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -115,7 +116,7 @@ func TestPersistedCheckPipelineEndToEnd(t *testing.T) {
 		MaxJobAttempts:           3,
 		WorkerCount:              1,
 		SchedulerBatchSize:       10,
-		CheckLeaseTimeout:        2 * time.Minute,
+		CheckLeaseTimeout:        2 * time.Second,
 		MaxRedirects:             1,
 		MaxBodyBytes:             64 * 1024,
 		MaxHeaderBytes:           64 * 1024,
@@ -126,12 +127,6 @@ func TestPersistedCheckPipelineEndToEnd(t *testing.T) {
 	}
 	policy := NewNetworkPolicy(cfg)
 	repo := NewPostgresMonitorRepository(pool, policy)
-	queue, err := NewRabbitMQQueue(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer queue.Close()
-
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	metrics := NewMetrics("e2e", "e2e", "e2e", 0)
 	checker := NewChecker(NewCheckHTTPClient(cfg, policy), cfg, metrics)
@@ -140,6 +135,11 @@ func TestPersistedCheckPipelineEndToEnd(t *testing.T) {
 		FailureThreshold: 1,
 		Cooldown:         time.Hour,
 	}, logger)
+	queue, err := NewRabbitMQQueueWithTopologyLossHandler(cfg, queueTopologyLossHandler(service, logger))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer queue.Close()
 	const apiKey = "e2e-api-key-with-24-characters"
 	apiHandler := NewAPIHandler(service, apiKey, logger)
 	apiMux := http.NewServeMux()
@@ -176,9 +176,7 @@ func TestPersistedCheckPipelineEndToEnd(t *testing.T) {
 		RunQueueScheduler(runCtx, service, queue, cfg, logger)
 	}()
 	workerDone := make(chan error, 1)
-	go func() {
-		workerDone <- RunQueueWorkers(runCtx, service, queue, 1, cfg.CheckLeaseTimeout, logger)
-	}()
+	workerStarted := false
 	defer func() {
 		stopRuntime()
 		select {
@@ -186,14 +184,82 @@ func TestPersistedCheckPipelineEndToEnd(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Error("scheduler did not stop")
 		}
-		select {
-		case err := <-workerDone:
-			if err != nil {
-				t.Errorf("worker stopped with error: %v", err)
+		if workerStarted {
+			select {
+			case err := <-workerDone:
+				if err != nil {
+					t.Errorf("worker stopped with error: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Error("worker did not stop")
 			}
-		case <-time.After(5 * time.Second):
-			t.Error("worker did not stop")
 		}
+	}()
+
+	var firstPublishedAt time.Time
+	e2eEventually(t, 30*time.Second, func() (bool, error) {
+		job, err := repo.GetCheckJob(ctx, receipt.JobID)
+		if err != nil {
+			return false, err
+		}
+		depth, err := rabbitQueueDepth(queue.url, queue.queueName)
+		if err != nil {
+			return false, err
+		}
+		if job.Status == checkJobStatusQueued && depth == 1 {
+			firstPublishedAt = job.PublishedAt
+			return true, nil
+		}
+		return false, nil
+	})
+
+	// A confirmed queued job must not be replayed merely because no worker is
+	// available. Its RabbitMQ message remains the single delivery authority.
+	time.Sleep(3*cfg.CheckLeaseTimeout + 1500*time.Millisecond)
+	queuedJob, err := repo.GetCheckJob(ctx, receipt.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	depth, err := rabbitQueueDepth(queue.url, queue.queueName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queuedJob.Status != checkJobStatusQueued || depth != 1 || targetRequests.Load() != 0 {
+		t.Fatalf("idle queue state = status=%s depth=%d target_requests=%d, want queued/1/0",
+			queuedJob.Status, depth, targetRequests.Load())
+	}
+	var activeJobs int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM check_jobs
+		WHERE monitor_id = $1
+			AND status IN ('scheduled', 'queued', 'processing', 'failed')
+	`, created.ID).Scan(&activeJobs); err != nil {
+		t.Fatal(err)
+	}
+	if activeJobs != 1 {
+		t.Fatalf("active jobs = %d, want 1", activeJobs)
+	}
+
+	if err := deleteRabbitQueue(queue.url, queue.queueName); err != nil {
+		t.Fatal(err)
+	}
+	e2eEventually(t, 30*time.Second, func() (bool, error) {
+		job, err := repo.GetCheckJob(ctx, receipt.JobID)
+		if err != nil {
+			return false, err
+		}
+		depth, err := rabbitQueueDepth(queue.url, queue.queueName)
+		if err != nil {
+			return false, err
+		}
+		return job.Status == checkJobStatusQueued &&
+			job.PublishedAt.After(firstPublishedAt) && depth == 1, nil
+	})
+
+	workerStarted = true
+	go func() {
+		workerDone <- RunQueueWorkers(runCtx, service, queue, 1, cfg.CheckLeaseTimeout, logger)
 	}()
 
 	e2eEventually(t, 30*time.Second, func() (bool, error) {
@@ -252,6 +318,42 @@ func TestPersistedCheckPipelineEndToEnd(t *testing.T) {
 	if resultCount != 1 || targetRequests.Load() != 1 {
 		t.Fatalf("duplicate delivery produced results=%d target_requests=%d, want 1 and 1", resultCount, targetRequests.Load())
 	}
+}
+
+func rabbitQueueDepth(rawURL, queueName string) (int, error) {
+	connection, err := amqp.Dial(rawURL)
+	if err != nil {
+		return 0, err
+	}
+	defer connection.Close()
+	channel, err := connection.Channel()
+	if err != nil {
+		return 0, err
+	}
+	defer channel.Close()
+	queue, err := channel.QueueInspect(queueName)
+	if err != nil {
+		if isRabbitMQNotFound(err) {
+			return -1, nil
+		}
+		return 0, err
+	}
+	return queue.Messages, nil
+}
+
+func deleteRabbitQueue(rawURL, queueName string) error {
+	connection, err := amqp.Dial(rawURL)
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	channel, err := connection.Channel()
+	if err != nil {
+		return err
+	}
+	defer channel.Close()
+	_, err = channel.QueueDelete(queueName, false, false, false)
+	return err
 }
 
 func e2eAPIRequest(

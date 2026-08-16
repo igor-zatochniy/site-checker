@@ -27,6 +27,10 @@ type MonitorRepository interface {
 	ListIncidents(ctx context.Context, status string, offset, limit int) ([]Incident, int, error)
 }
 
+type QueuedJobRecoveryRepository interface {
+	RecoverQueuedJobsAfterTopologyLoss(ctx context.Context) (int64, error)
+}
+
 type InMemoryMonitorRepository struct {
 	store *MonitorStore
 }
@@ -82,6 +86,10 @@ func (r *InMemoryMonitorRepository) MarkJobPublished(_ context.Context, id, jobI
 
 func (r *InMemoryMonitorRepository) ReleaseJobPublish(_ context.Context, id, jobID, lastError string) error {
 	return r.store.ReleaseJobPublish(id, jobID, lastError, time.Now().UTC())
+}
+
+func (r *InMemoryMonitorRepository) RecoverQueuedJobsAfterTopologyLoss(context.Context) (int64, error) {
+	return r.store.RecoverQueuedJobsAfterTopologyLoss(time.Now().UTC()), nil
 }
 
 func (r *InMemoryMonitorRepository) MarkJobProcessing(_ context.Context, id, jobID string, attempt int, leaseTimeout time.Duration) (ProcessingLease, error) {

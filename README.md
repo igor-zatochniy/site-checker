@@ -296,7 +296,7 @@ Expected demonstration:
 - SSRF protection is implemented in application code and reinforced by Kubernetes NetworkPolicy. Application-level checks give portable behavior; network policy adds defense in depth in clusters.
 - A check result, incident transition, cooldown decision, and alert outbox insert share one PostgreSQL transaction. Webhook delivery is intentionally at-least-once; a stable `Idempotency-Key` lets receivers deduplicate the rare retry after an ambiguous network outcome.
 - Built-in demo URLs are opt-in. Normal deployments start with an empty monitor set to avoid sending unintended traffic to third-party websites.
-- RabbitMQ publication and consumption recover from runtime connection loss with bounded exponential backoff. Delivery remains at-least-once because a connection can fail after the broker accepted a publish or acknowledgement; persisted job states, monotonic attempts, unique result job IDs, and fenced processing leases make those retry windows safe.
+- RabbitMQ publication and consumption recover from runtime connection loss with bounded exponential backoff. Confirmed `queued` jobs are not replayed by elapsed time; they are returned to the persisted publish path only after the application proves that the main queue topology was lost. Delivery remains at-least-once because a connection can fail after the broker accepted a publish or acknowledgement; persisted job states, monotonic attempts, unique result job IDs, and fenced processing leases make those retry windows safe.
 - PostgreSQL retention removes expired history in indexed batches owned by the scheduler. The feature is opt-in in application configuration and explicitly enabled in the supplied scheduler deployments.
 - Kubernetes source manifests use a fixed readable tag for local rendering, while release CI produces a digest-pinned deployment bundle so production rollouts reference immutable image content.
 
@@ -308,6 +308,7 @@ Expected demonstration:
 - Webhook receivers should honor `Idempotency-Key` because no distributed system can guarantee exactly-once delivery across a database commit and an external HTTP endpoint.
 - PostgreSQL and RabbitMQ Kubernetes manifests are suitable for local or demonstration clusters. Production deployments should use managed services or hardened StatefulSets with backups, persistence, TLS, monitoring, and secret rotation.
 - KEDA queue-based scaling requires the KEDA operator to be installed separately.
+- The default Kubernetes egress policy permits public IPv4 HTTP/HTTPS destinations only. IPv6 monitoring requires an environment-specific CNI policy with equivalent private and special-range exclusions.
 - The project exposes Prometheus-format metrics, but alert rules and dashboards are intentionally left environment-specific.
 
 ## Configuration
@@ -334,7 +335,7 @@ Expected demonstration:
 | `MAX_JOB_ATTEMPTS` | `3` | Strict maximum processing attempts. PostgreSQL lease recovery terminalizes an expired final attempt without publishing another delivery. |
 | `WORKER_COUNT` | `10` | Number of worker goroutines in each worker process. |
 | `SCHEDULER_BATCH_SIZE` | `100` | Number of due monitors claimed per scheduler tick. |
-| `CHECK_LEASE_TIMEOUT` | `2m` | Bounds publication, queued-delivery, and processing recovery leases. It must be at least 90 seconds: the maximum 60-second monitor timeout plus a 30-second persistence margin. |
+| `CHECK_LEASE_TIMEOUT` | `2m` | Bounds publication claims and processing recovery leases. Confirmed queued deliveries do not expire by time. It must be at least 90 seconds: the maximum 60-second monitor timeout plus a 30-second persistence margin. |
 | `CHECK_INTERVAL` | `5m` | Default interval for seeded monitors. |
 | `HTTP_TIMEOUT` | `5s` | Default `timeout_seconds` for seeded monitors. Each monitor context owns its actual timeout; this value is not a global client cap. |
 | `HEALTH_ADDR` | `:8080` | Address for REST, health, and metrics endpoints. Must not be empty for `api` and `all` roles. |

@@ -436,18 +436,18 @@ func (s *MonitorStore) ClaimDueJobsWithMaxAttempts(limit int, now time.Time, lea
 	}
 
 	for jobID, job := range s.checkJobs {
-		var recoveryError string
-		switch {
-		case job.Status == checkJobStatusProcessing && !job.LeaseExpiresAt.IsZero() && !job.LeaseExpiresAt.After(now):
-			recoveryError = "processing lease expired"
-		case job.Status == checkJobStatusQueued && !job.PublishedAt.IsZero() && !job.PublishedAt.Add(leaseTimeout).After(now):
-			recoveryError = "queued delivery lease expired"
-		case job.Status == checkJobStatusFailed && !job.AvailableAt.After(now):
-			recoveryError = "maximum processing attempts reached"
-		default:
+		processingExpired := job.Status == checkJobStatusProcessing &&
+			!job.LeaseExpiresAt.IsZero() && !job.LeaseExpiresAt.After(now)
+		failedExhausted := job.Status == checkJobStatusFailed &&
+			!job.AvailableAt.After(now) && job.Attempt >= maxAttempts
+		if !processingExpired && !failedExhausted {
 			continue
 		}
 		if job.Attempt >= maxAttempts {
+			recoveryError := "maximum processing attempts reached"
+			if processingExpired {
+				recoveryError = "processing lease expired"
+			}
 			s.finishExhaustedJobLocked(jobID, job, recoveryError, now)
 			continue
 		}
@@ -456,7 +456,7 @@ func (s *MonitorStore) ClaimDueJobsWithMaxAttempts(limit int, now time.Time, lea
 		job.ProcessingStartedAt = time.Time{}
 		job.LeaseExpiresAt = time.Time{}
 		job.LeaseToken = ""
-		job.LastError = recoveryError
+		job.LastError = "processing lease expired"
 		job.UpdatedAt = now
 		s.checkJobs[jobID] = job
 	}
@@ -638,6 +638,30 @@ func (s *MonitorStore) ReleaseJobPublish(id, jobID, lastError string, now time.T
 	job.UpdatedAt = now.UTC()
 	s.checkJobs[jobID] = job
 	return nil
+}
+
+func (s *MonitorStore) RecoverQueuedJobsAfterTopologyLoss(now time.Time) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now = now.UTC()
+	var recovered int64
+	for jobID, job := range s.checkJobs {
+		if job.Status != checkJobStatusQueued {
+			continue
+		}
+		job.Status = checkJobStatusFailed
+		job.AvailableAt = now
+		job.PublishedAt = time.Time{}
+		job.ProcessingStartedAt = time.Time{}
+		job.LeaseExpiresAt = time.Time{}
+		job.LeaseToken = ""
+		job.LastError = "rabbitmq queue topology was lost"
+		job.UpdatedAt = now
+		s.checkJobs[jobID] = job
+		recovered++
+	}
+	return recovered
 }
 
 func (s *MonitorStore) MarkJobProcessing(id, jobID string, attempt int, now time.Time, leaseTimeout time.Duration) (ProcessingLease, error) {

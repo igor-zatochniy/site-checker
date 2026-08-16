@@ -97,6 +97,14 @@ func (s *MonitorService) ReleaseJobPublish(ctx context.Context, id, jobID, lastE
 	return s.repo.ReleaseJobPublish(ctx, id, jobID, lastError)
 }
 
+func (s *MonitorService) RecoverQueuedJobsAfterTopologyLoss(ctx context.Context) (int64, error) {
+	repo, ok := s.repo.(QueuedJobRecoveryRepository)
+	if !ok {
+		return 0, errors.New("configured repository does not support queued job recovery")
+	}
+	return repo.RecoverQueuedJobsAfterTopologyLoss(ctx)
+}
+
 func (s *MonitorService) MarkProcessing(ctx context.Context, id, jobID string, attempt int, leaseTimeout time.Duration) (ProcessingLease, error) {
 	return s.repo.MarkJobProcessing(ctx, id, jobID, attempt, leaseTimeout)
 }

@@ -203,6 +203,12 @@ type RabbitMQQueue struct {
 	publishClosed <-chan *amqp.Error
 	closed        bool
 	done          chan struct{}
+
+	topologyMu                  sync.Mutex
+	topologyRecoveryMu          sync.Mutex
+	topologyLossGeneration      uint64
+	recoveredTopologyGeneration uint64
+	topologyLossHandler         func(context.Context) error
 }
 
 type rabbitMQDialFunc func(ctx context.Context, rawURL string, connectTimeout, writeTimeout time.Duration) (*amqp.Connection, error)
@@ -223,19 +229,31 @@ type rabbitMQPublishSession struct {
 }
 
 func NewRabbitMQQueue(cfg Config) (*RabbitMQQueue, error) {
+	return newRabbitMQQueue(cfg, nil)
+}
+
+func NewRabbitMQQueueWithTopologyLossHandler(cfg Config, handler func(context.Context) error) (*RabbitMQQueue, error) {
+	if handler == nil {
+		return nil, errors.New("rabbitmq topology loss handler must not be nil")
+	}
+	return newRabbitMQQueue(cfg, handler)
+}
+
+func newRabbitMQQueue(cfg Config, handler func(context.Context) error) (*RabbitMQQueue, error) {
 	queue := &RabbitMQQueue{
-		url:              cfg.RabbitMQURL,
-		queueName:        cfg.QueueName,
-		dlqName:          cfg.DeadLetterQueueName,
-		prefetch:         cfg.QueuePrefetch,
-		maxAttempts:      cfg.MaxJobAttempts,
-		connectTimeout:   durationOrDefault(cfg.RabbitMQConnectTimeout, defaultRabbitMQConnectTimeout),
-		publishTimeout:   durationOrDefault(cfg.RabbitMQPublishTimeout, defaultRabbitMQPublishTimeout),
-		reconnectInitial: durationOrDefault(cfg.RabbitMQReconnectInitial, defaultRabbitMQReconnectInitial),
-		reconnectMax:     durationOrDefault(cfg.RabbitMQReconnectMax, defaultRabbitMQReconnectMax),
-		dial:             dialRabbitMQ,
-		reconnectGate:    make(chan struct{}, 1),
-		done:             make(chan struct{}),
+		url:                 cfg.RabbitMQURL,
+		queueName:           cfg.QueueName,
+		dlqName:             cfg.DeadLetterQueueName,
+		prefetch:            cfg.QueuePrefetch,
+		maxAttempts:         cfg.MaxJobAttempts,
+		connectTimeout:      durationOrDefault(cfg.RabbitMQConnectTimeout, defaultRabbitMQConnectTimeout),
+		publishTimeout:      durationOrDefault(cfg.RabbitMQPublishTimeout, defaultRabbitMQPublishTimeout),
+		reconnectInitial:    durationOrDefault(cfg.RabbitMQReconnectInitial, defaultRabbitMQReconnectInitial),
+		reconnectMax:        durationOrDefault(cfg.RabbitMQReconnectMax, defaultRabbitMQReconnectMax),
+		dial:                dialRabbitMQ,
+		reconnectGate:       make(chan struct{}, 1),
+		done:                make(chan struct{}),
+		topologyLossHandler: handler,
 	}
 	connectCtx, cancel := context.WithTimeout(context.Background(), queue.connectTimeout)
 	defer cancel()
@@ -243,6 +261,51 @@ func NewRabbitMQQueue(cfg Config) (*RabbitMQQueue, error) {
 		return nil, err
 	}
 	return queue, nil
+}
+
+func (q *RabbitMQQueue) SetTopologyLossHandler(ctx context.Context, handler func(context.Context) error) error {
+	if handler == nil {
+		return errors.New("rabbitmq topology loss handler must not be nil")
+	}
+	q.topologyMu.Lock()
+	q.topologyLossHandler = handler
+	q.topologyMu.Unlock()
+	return q.recoverDetectedTopologyLoss(ctx)
+}
+
+func (q *RabbitMQQueue) recordTopologyLoss(ctx context.Context) error {
+	q.topologyMu.Lock()
+	q.topologyLossGeneration++
+	q.topologyMu.Unlock()
+	return q.recoverDetectedTopologyLoss(ctx)
+}
+
+func (q *RabbitMQQueue) recoverDetectedTopologyLoss(ctx context.Context) error {
+	q.topologyRecoveryMu.Lock()
+	defer q.topologyRecoveryMu.Unlock()
+
+	for {
+		q.topologyMu.Lock()
+		generation := q.topologyLossGeneration
+		if generation <= q.recoveredTopologyGeneration {
+			q.topologyMu.Unlock()
+			return nil
+		}
+		handler := q.topologyLossHandler
+		q.topologyMu.Unlock()
+		if handler == nil {
+			return nil
+		}
+		if err := handler(ctx); err != nil {
+			return err
+		}
+
+		q.topologyMu.Lock()
+		if generation > q.recoveredTopologyGeneration {
+			q.recoveredTopologyGeneration = generation
+		}
+		q.topologyMu.Unlock()
+	}
 }
 
 func dialRabbitMQ(ctx context.Context, rawURL string, connectTimeout, writeTimeout time.Duration) (*amqp.Connection, error) {
@@ -311,17 +374,42 @@ func (q *RabbitMQQueue) Ping(ctx context.Context) error {
 		return err
 	}
 	defer channel.Close()
-	if _, err = channel.QueueDeclarePassive(q.queueName, true, false, false, false, nil); err == nil {
+	if _, err = channel.QueueDeclarePassive(q.queueName, true, false, false, false, nil); err != nil {
+		passiveErr := err
+		if err := q.repairTopology(ctx); err != nil {
+			return errors.Join(passiveErr, fmt.Errorf("repair rabbitmq topology: %w", err))
+		}
 		return nil
 	}
-	passiveErr := err
-	if err := q.repairTopology(ctx); err != nil {
-		return errors.Join(passiveErr, fmt.Errorf("repair rabbitmq topology: %w", err))
+	if err = channel.ExchangeDeclarePassive("site_checker.dlx", "direct", true, false, false, false, nil); err != nil {
+		passiveErr := err
+		if err := q.repairTopology(ctx); err != nil {
+			return errors.Join(passiveErr, fmt.Errorf("repair rabbitmq dead-letter exchange: %w", err))
+		}
+		return nil
 	}
-	return nil
+	if _, err = channel.QueueDeclarePassive(q.dlqName, true, false, false, false, nil); err != nil {
+		passiveErr := err
+		if err := q.repairTopology(ctx); err != nil {
+			return errors.Join(passiveErr, fmt.Errorf("repair rabbitmq dead-letter queue: %w", err))
+		}
+		return nil
+	}
+	return q.recoverDetectedTopologyLoss(ctx)
 }
 
 func (q *RabbitMQQueue) declareTopology(channel *amqp.Channel) error {
+	if err := q.declareDeadLetterTopology(channel); err != nil {
+		return err
+	}
+	_, err := channel.QueueDeclare(q.queueName, true, false, false, false, amqp.Table{
+		"x-dead-letter-exchange":    "site_checker.dlx",
+		"x-dead-letter-routing-key": q.dlqName,
+	})
+	return err
+}
+
+func (q *RabbitMQQueue) declareDeadLetterTopology(channel *amqp.Channel) error {
 	if err := channel.ExchangeDeclare(
 		"site_checker.dlx",
 		"direct",
@@ -340,12 +428,7 @@ func (q *RabbitMQQueue) declareTopology(channel *amqp.Channel) error {
 	if err := channel.QueueBind(q.dlqName, q.dlqName, "site_checker.dlx", false, nil); err != nil {
 		return err
 	}
-
-	_, err := channel.QueueDeclare(q.queueName, true, false, false, false, amqp.Table{
-		"x-dead-letter-exchange":    "site_checker.dlx",
-		"x-dead-letter-routing-key": q.dlqName,
-	})
-	return err
+	return nil
 }
 
 func (q *RabbitMQQueue) repairTopology(ctx context.Context) error {
@@ -361,19 +444,108 @@ func (q *RabbitMQQueue) repairTopology(ctx context.Context) error {
 	if conn == nil || conn.IsClosed() {
 		return ErrQueueConsumerClosed
 	}
-	channel, err := conn.Channel()
-	if err != nil {
-		q.invalidateConnection(conn)
-		return err
-	}
-	defer channel.Close()
-	if err := q.declareTopology(channel); err != nil {
+	if err := q.repairTopologyOnConnection(ctx, conn); err != nil {
 		if conn.IsClosed() {
 			q.invalidateConnection(conn)
 		}
 		return err
 	}
 	return nil
+}
+
+func (q *RabbitMQQueue) repairTopologyOnConnection(ctx context.Context, conn *amqp.Connection) error {
+	channel, err := conn.Channel()
+	if err != nil {
+		return err
+	}
+	if _, err := channel.QueueDeclarePassive(q.queueName, true, false, false, false, nil); err != nil {
+		if !isRabbitMQNotFound(err) {
+			_ = channel.Close()
+			return err
+		}
+		_ = channel.Close()
+	} else {
+		defer channel.Close()
+		return q.declareDeadLetterTopology(channel)
+	}
+
+	releaseLock, err := q.acquireTopologyRecoveryLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseLock()
+
+	channel, err = conn.Channel()
+	if err != nil {
+		return err
+	}
+	if _, err := channel.QueueDeclarePassive(q.queueName, true, false, false, false, nil); err == nil {
+		defer channel.Close()
+		return q.declareDeadLetterTopology(channel)
+	} else if !isRabbitMQNotFound(err) {
+		_ = channel.Close()
+		return err
+	}
+	_ = channel.Close()
+	channel, err = conn.Channel()
+	if err != nil {
+		return err
+	}
+	defer channel.Close()
+
+	q.topologyMu.Lock()
+	hasHandler := q.topologyLossHandler != nil
+	q.topologyMu.Unlock()
+	if hasHandler {
+		if err := q.recordTopologyLoss(ctx); err != nil {
+			return fmt.Errorf("recover queued jobs before restoring rabbitmq topology: %w", err)
+		}
+	}
+	if err := q.declareTopology(channel); err != nil {
+		return err
+	}
+	if !hasHandler {
+		if err := q.recordTopologyLoss(ctx); err != nil {
+			return fmt.Errorf("record rabbitmq topology loss: %w", err)
+		}
+	}
+	return nil
+}
+
+func (q *RabbitMQQueue) acquireTopologyRecoveryLock(ctx context.Context) (func(), error) {
+	lockName := q.queueName + ".topology-recovery-lock"
+	for {
+		connection, err := q.dial(ctx, q.url, q.connectTimeout, q.publishTimeout)
+		if err != nil {
+			return nil, err
+		}
+		channel, err := connection.Channel()
+		if err != nil {
+			_ = connection.Close()
+			return nil, err
+		}
+		_, err = channel.QueueDeclare(lockName, false, true, true, false, nil)
+		if err == nil {
+			return func() {
+				_ = channel.Close()
+				_ = connection.Close()
+			}, nil
+		}
+		_ = channel.Close()
+		_ = connection.Close()
+		var rabbitErr *amqp.Error
+		if !errors.As(err, &rabbitErr) || rabbitErr.Code != 405 {
+			return nil, err
+		}
+		if err := q.waitForReconnect(ctx, 50*time.Millisecond); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func isRabbitMQNotFound(err error) bool {
+	var rabbitErr *amqp.Error
+	return errors.As(err, &rabbitErr) && rabbitErr.Code == 404
 }
 
 func (q *RabbitMQQueue) Publish(ctx context.Context, job CheckJobMessage) error {
@@ -398,6 +570,9 @@ func (q *RabbitMQQueue) Publish(ctx context.Context, job CheckJobMessage) error 
 	for attempt := 1; ; attempt++ {
 		if err := q.ensureConnected(publishCtx); err != nil {
 			return err
+		}
+		if err := q.recoverDetectedTopologyLoss(publishCtx); err != nil {
+			return fmt.Errorf("recover queued jobs before publish: %w", err)
 		}
 		q.publishMu.Lock()
 		session := q.publishSession()
@@ -536,15 +711,14 @@ func (q *RabbitMQQueue) consumeSession(ctx context.Context, deliveries chan<- Qu
 	if conn == nil {
 		return ErrQueueConsumerClosed
 	}
-	channel, err := conn.Channel()
+	channel, err := q.openTopologyChannel(ctx, conn)
 	if err != nil {
-		q.invalidateConnection(conn)
+		if conn.IsClosed() {
+			q.invalidateConnection(conn)
+		}
 		return err
 	}
 	defer channel.Close()
-	if err := q.declareTopology(channel); err != nil {
-		return fmt.Errorf("declare rabbitmq consumer topology: %w", err)
-	}
 	if err := channel.Qos(q.prefetch, 0, false); err != nil {
 		return err
 	}
@@ -570,6 +744,9 @@ func (q *RabbitMQQueue) consumeSession(ctx context.Context, deliveries chan<- Qu
 			if !ok {
 				return ErrQueueConsumerClosed
 			}
+			if err := q.repairTopology(ctx); err != nil {
+				return fmt.Errorf("recover topology after rabbitmq consumer %q was canceled: %w", consumerTag, err)
+			}
 			return fmt.Errorf("rabbitmq consumer %q was canceled", consumerTag)
 		case delivery, ok := <-rawDeliveries:
 			if !ok {
@@ -578,7 +755,7 @@ func (q *RabbitMQQueue) consumeSession(ctx context.Context, deliveries chan<- Qu
 			msg := delivery
 			job, err := decodeJobMessage(msg.Body)
 			if err != nil {
-				_ = msg.Nack(false, false)
+				_ = q.deadLetter(ctx, msg)
 				continue
 			}
 
@@ -599,7 +776,7 @@ func (q *RabbitMQQueue) consumeSession(ctx context.Context, deliveries chan<- Qu
 					}
 					return msg.Ack(false)
 				}
-				return msg.Nack(false, false)
+				return q.deadLetter(ctx, msg)
 			}
 			queueDelivery.Requeue = func(context.Context) error {
 				return msg.Nack(false, true)
@@ -616,6 +793,13 @@ func (q *RabbitMQQueue) consumeSession(ctx context.Context, deliveries chan<- Qu
 			}
 		}
 	}
+}
+
+func (q *RabbitMQQueue) deadLetter(ctx context.Context, delivery amqp.Delivery) error {
+	if err := q.Ping(ctx); err != nil {
+		return errors.Join(fmt.Errorf("ensure rabbitmq dead-letter topology: %w", err), delivery.Nack(false, true))
+	}
+	return delivery.Nack(false, false)
 }
 
 func (q *RabbitMQQueue) ensureConnected(ctx context.Context) error {
@@ -663,13 +847,8 @@ func (q *RabbitMQQueue) connectOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	channel, err := conn.Channel()
+	channel, err := q.openTopologyChannel(ctx, conn)
 	if err != nil {
-		_ = conn.Close()
-		return err
-	}
-	if err := q.declareTopology(channel); err != nil {
-		_ = channel.Close()
 		_ = conn.Close()
 		return err
 	}
@@ -700,6 +879,13 @@ func (q *RabbitMQQueue) connectOnce(ctx context.Context) error {
 		_ = oldConn.Close()
 	}
 	return nil
+}
+
+func (q *RabbitMQQueue) openTopologyChannel(ctx context.Context, conn *amqp.Connection) (*amqp.Channel, error) {
+	if err := q.repairTopologyOnConnection(ctx, conn); err != nil {
+		return nil, err
+	}
+	return conn.Channel()
 }
 
 func (q *RabbitMQQueue) acquireReconnect(ctx context.Context) error {

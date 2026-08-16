@@ -72,10 +72,17 @@ type AlertSender struct {
 }
 
 func NewAlertSender(webhookURL, userAgent string, client *http.Client) *AlertSender {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	alertClient := *client
+	alertClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	return &AlertSender{
 		webhookURL: webhookURL,
 		userAgent:  userAgent,
-		client:     client,
+		client:     &alertClient,
 	}
 }
 

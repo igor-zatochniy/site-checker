@@ -3,11 +3,11 @@ package sitechecker
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -71,6 +71,54 @@ func TestAlertSenderRejectsNonSuccessStatus(t *testing.T) {
 	err := sender.Send(t.Context(), AlertOutboxEvent{IdempotencyKey: "event-1"})
 	if err == nil {
 		t.Fatal("Send returned nil error for non-success status")
+	}
+}
+
+func TestAlertSenderRejectsRedirectWithoutChangingPOSTToGET(t *testing.T) {
+	var redirectedRequests atomic.Int32
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		redirectedRequests.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer redirectTarget.Close()
+
+	redirectingWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		http.Redirect(w, r, redirectTarget.URL, http.StatusFound)
+	}))
+	defer redirectingWebhook.Close()
+
+	repo := &recordingAlertOutboxRepository{events: []AlertOutboxEvent{{
+		ID:             "event-redirect",
+		IdempotencyKey: "incident-redirect:failure:1",
+		AttemptCount:   1,
+		LeaseToken:     "lease-redirect",
+	}}}
+	cfg := Config{
+		AlertDispatchBatchSize:   1,
+		AlertLeaseTimeout:        time.Minute,
+		AlertDeliveryTimeout:     time.Second,
+		AlertMaxAttempts:         3,
+		AlertRetryInitialBackoff: time.Second,
+		AlertRetryMaxBackoff:     time.Minute,
+	}
+	metrics := NewMetrics("test", "commit", "date", 0)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	sender := NewAlertSender(redirectingWebhook.URL, "site-checker-test", redirectingWebhook.Client())
+
+	if _, err := dispatchAlertBatch(t.Context(), repo, sender, cfg, metrics, logger); err != nil {
+		t.Fatal(err)
+	}
+	if repo.deliveredID != "" {
+		t.Fatalf("redirected alert was marked delivered as %q", repo.deliveredID)
+	}
+	if repo.failedID != "event-redirect" || repo.failedDead {
+		t.Fatalf("redirect failure = id:%q dead:%t, want retryable event-redirect", repo.failedID, repo.failedDead)
+	}
+	if redirectedRequests.Load() != 0 {
+		t.Fatalf("redirect target received %d requests, want 0", redirectedRequests.Load())
 	}
 }
 
@@ -247,6 +295,7 @@ func TestParseRetryAfterHTTPDateUsesServerDate(t *testing.T) {
 
 type recordingAlertOutboxRepository struct {
 	events             []AlertOutboxEvent
+	deliveredID        string
 	failedID           string
 	failedLease        string
 	failedRetryDelay   time.Duration
@@ -259,8 +308,9 @@ func (r *recordingAlertOutboxRepository) ClaimAlerts(_ context.Context, _ int, _
 	return r.events, nil
 }
 
-func (r *recordingAlertOutboxRepository) MarkAlertDelivered(context.Context, string, string) error {
-	return errors.New("unexpected delivery")
+func (r *recordingAlertOutboxRepository) MarkAlertDelivered(_ context.Context, id, _ string) error {
+	r.deliveredID = id
+	return nil
 }
 
 func (r *recordingAlertOutboxRepository) MarkAlertFailed(_ context.Context, id, leaseToken, _ string, retryDelay time.Duration, dead bool) error {

@@ -95,16 +95,15 @@ func runApplication(parentCtx context.Context, version, commit, buildDate string
 			return errors.New("configured repository does not support persisted alert delivery")
 		}
 		alertClient := &http.Client{
-			Transport:     NewSecureTransport(cfg, policy),
-			Timeout:       cfg.AlertDeliveryTimeout,
-			CheckRedirect: policy.CheckRedirect,
+			Transport: NewSecureTransport(cfg, policy),
+			Timeout:   cfg.AlertDeliveryTimeout,
 		}
 		alertSender = NewAlertSender(cfg.AlertWebhookURL, cfg.UserAgent, alertClient)
 	}
 
 	var queue JobQueue
 	if roleEnabled(cfg.AppRole, "scheduler") || roleEnabled(cfg.AppRole, "worker") {
-		queue, err = NewConfiguredQueue(cfg)
+		queue, err = NewConfiguredQueueWithTopologyLossHandler(cfg, queueTopologyLossHandler(service, logger))
 		if err != nil {
 			return fmt.Errorf("initialize queue: %w", err)
 		}

@@ -365,14 +365,12 @@ func (r *PostgresMonitorRepository) ClaimDueJobs(ctx context.Context, limit int,
 				completed_at = $1::timestamptz,
 				last_error = CASE status
 					WHEN 'processing' THEN 'processing lease expired; maximum attempts reached'
-					WHEN 'queued' THEN 'queued delivery lease expired; maximum attempts reached'
 					ELSE 'maximum processing attempts reached'
 				END,
 				updated_at = $1::timestamptz
 			WHERE attempt >= $2
 				AND (
 					(status = 'processing' AND lease_expires_at <= $1::timestamptz)
-					OR (status = 'queued' AND published_at <= $3::timestamptz)
 					OR (status = 'failed' AND available_at <= $1::timestamptz)
 					OR (status = 'scheduled' AND lease_expires_at <= $1::timestamptz)
 				)
@@ -384,7 +382,7 @@ func (r *PostgresMonitorRepository) ClaimDueJobs(ctx context.Context, limit int,
 		FROM exhausted
 		WHERE monitor.id = exhausted.monitor_id
 			AND exhausted.kind = 'scheduled'
-	`, now, maxAttempts, now.Add(-leaseTimeout)); err != nil {
+	`, now, maxAttempts); err != nil {
 		return nil, err
 	}
 
@@ -401,20 +399,6 @@ func (r *PostgresMonitorRepository) ClaimDueJobs(ctx context.Context, limit int,
 			AND lease_expires_at <= $1::timestamptz
 			AND attempt < $2
 	`, now, maxAttempts); err != nil {
-		return nil, err
-	}
-
-	if _, err := tx.Exec(ctx, `
-		UPDATE check_jobs
-		SET status = 'failed',
-			available_at = $1::timestamptz,
-			lease_expires_at = NULL,
-			last_error = 'queued delivery lease expired',
-			updated_at = $1::timestamptz
-		WHERE status = 'queued'
-			AND published_at <= $2::timestamptz
-			AND attempt < $3
-	`, now, now.Add(-leaseTimeout), maxAttempts); err != nil {
 		return nil, err
 	}
 
@@ -565,6 +549,29 @@ func (r *PostgresMonitorRepository) ReleaseJobPublish(ctx context.Context, id, j
 		return nil
 	}
 	return r.acceptAdvancedJobState(ctx, id, jobID)
+}
+
+func (r *PostgresMonitorRepository) RecoverQueuedJobsAfterTopologyLoss(ctx context.Context) (int64, error) {
+	tag, err := r.pool.Exec(ctx, `
+		WITH db_clock AS MATERIALIZED (
+			SELECT clock_timestamp() AS now
+		)
+		UPDATE check_jobs
+		SET status = 'failed',
+			available_at = db_clock.now,
+			published_at = NULL,
+			processing_started_at = NULL,
+			lease_expires_at = NULL,
+			lease_token = NULL,
+			last_error = 'rabbitmq queue topology was lost',
+			updated_at = db_clock.now
+		FROM db_clock
+		WHERE status = 'queued'
+	`)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (r *PostgresMonitorRepository) MarkJobProcessing(ctx context.Context, id, jobID string, attempt int, leaseTimeout time.Duration) (ProcessingLease, error) {

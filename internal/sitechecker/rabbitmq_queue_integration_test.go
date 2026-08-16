@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,17 +45,56 @@ func TestRabbitMQQueueRetriesAndDeadLetters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	queue, err := NewRabbitMQQueue(Config{
+	queueConfig := Config{
 		RabbitMQURL:         fmt.Sprintf("amqp://site_checker:site_checker@%s/", endpoint),
 		QueueName:           "site_checker.integration.checks",
 		DeadLetterQueueName: "site_checker.integration.checks.dead",
 		QueuePrefetch:       1,
 		MaxJobAttempts:      2,
-	})
+	}
+	queue, err := NewRabbitMQQueue(queueConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer queue.Close()
+
+	var topologyRecoveries atomic.Int32
+	recoveryHandler := func(context.Context) error {
+		topologyRecoveries.Add(1)
+		return nil
+	}
+	if err := queue.SetTopologyLossHandler(ctx, recoveryHandler); err != nil {
+		t.Fatal(err)
+	}
+	topologyRecoveries.Store(0)
+	secondQueue, err := NewRabbitMQQueueWithTopologyLossHandler(queueConfig, recoveryHandler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondQueue.Close()
+
+	if err := deleteRabbitQueue(queue.url, queue.queueName); err != nil {
+		t.Fatal(err)
+	}
+	var recoveryWaitGroup sync.WaitGroup
+	recoveryErrors := make(chan error, 2)
+	for _, candidate := range []*RabbitMQQueue{queue, secondQueue} {
+		recoveryWaitGroup.Add(1)
+		go func(candidate *RabbitMQQueue) {
+			defer recoveryWaitGroup.Done()
+			recoveryErrors <- candidate.Ping(ctx)
+		}(candidate)
+	}
+	recoveryWaitGroup.Wait()
+	close(recoveryErrors)
+	for err := range recoveryErrors {
+		if err != nil {
+			t.Fatalf("concurrent topology recovery: %v", err)
+		}
+	}
+	if got := topologyRecoveries.Load(); got != 1 {
+		t.Fatalf("topology recovery handlers = %d, want exactly 1", got)
+	}
 
 	deliveries, _, err := queue.Consume(ctx)
 	if err != nil {
@@ -148,6 +189,27 @@ func TestRabbitMQQueueRetriesAndDeadLetters(t *testing.T) {
 	}
 	if err := restarted.Ack(brokerRestartCtx); err != nil {
 		t.Fatalf("ack after RabbitMQ restart: %v", err)
+	}
+
+	if err := deleteRabbitQueue(queue.url, queue.dlqName); err != nil {
+		t.Fatalf("delete only RabbitMQ dead-letter queue: %v", err)
+	}
+	terminalJob := CheckJobMessage{
+		JobID:      "job_integration_repair_isolated_dlq",
+		MonitorID:  "mon_integration",
+		Attempt:    2,
+		EnqueuedAt: time.Now().UTC(),
+	}
+	if err := queue.Publish(brokerRestartCtx, terminalJob); err != nil {
+		t.Fatalf("publish before isolated dead-letter recovery: %v", err)
+	}
+	terminalDelivery := receiveRabbitDelivery(t, deliveries)
+	if err := terminalDelivery.Nack(brokerRestartCtx, false); err != nil {
+		t.Fatalf("terminal nack after isolated dead-letter deletion: %v", err)
+	}
+	repairedDeadLetter := receiveRabbitDeadLetter(t, brokerRestartCtx, queue)
+	if repairedDeadLetter.JobID != terminalJob.JobID {
+		t.Fatalf("dead-letter after isolated recovery = %q, want %q", repairedDeadLetter.JobID, terminalJob.JobID)
 	}
 
 	queue.mu.RLock()

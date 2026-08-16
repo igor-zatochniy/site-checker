@@ -62,6 +62,8 @@ Expected behavior:
 
 The included PostgreSQL and RabbitMQ manifests are suitable for local demonstration. For production, prefer managed PostgreSQL and RabbitMQ or hardened StatefulSets with backups, persistence, TLS, monitoring, and secret rotation.
 
+The base NetworkPolicy allows checked and webhook destinations through public IPv4 ranges on TCP 80/443 only. It intentionally has no IPv6 egress rule because Kubernetes NetworkPolicy cannot express the same public-only boundary without an explicit IPv6 CIDR policy. Clusters that require IPv6 monitoring must add CNI-specific IPv6 rules with equivalent exclusions for loopback, link-local, unique-local, documentation, multicast, and other non-public ranges before enabling IPv6 destinations.
+
 The included `secret.example.yaml` uses local-demo placeholder values only. Production deployments should use External Secrets Operator, SOPS, Sealed Secrets, or a managed secret store.
 
 `ALLOW_PRIVATE_NETWORKS=true` alone does not override Kubernetes egress policy. To monitor a trusted private destination, edit the CIDR and ports in `../kubernetes-overlays/trusted-private-egress/trusted-private-egress.yaml`, then apply that overlay instead of the base:

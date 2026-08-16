@@ -52,6 +52,13 @@ func NewConfiguredQueue(cfg Config) (JobQueue, error) {
 	return NewInMemoryQueue(cfg.QueueBufferSize, cfg.MaxJobAttempts), nil
 }
 
+func NewConfiguredQueueWithTopologyLossHandler(cfg Config, handler func(context.Context) error) (JobQueue, error) {
+	if cfg.QueueType == "rabbitmq" {
+		return NewRabbitMQQueueWithTopologyLossHandler(cfg, handler)
+	}
+	return NewInMemoryQueue(cfg.QueueBufferSize, cfg.MaxJobAttempts), nil
+}
+
 func RunHTTPServer(
 	ctx context.Context,
 	cfg Config,
@@ -113,7 +120,13 @@ func RunQueueScheduler(ctx context.Context, service *MonitorService, queue JobQu
 	defer ticker.Stop()
 
 	for {
-		enqueueDueMonitorJobs(ctx, service, queue, cfg.SchedulerBatchSize, cfg.CheckLeaseTimeout, cfg.MaxJobAttempts, logger)
+		if err := queue.Ping(ctx); err != nil {
+			if ctx.Err() == nil {
+				logger.Warn("RabbitMQ topology check failed", "error", err)
+			}
+		} else {
+			enqueueDueMonitorJobs(ctx, service, queue, cfg.SchedulerBatchSize, cfg.CheckLeaseTimeout, cfg.MaxJobAttempts, logger)
+		}
 
 		select {
 		case <-ctx.Done():
@@ -121,6 +134,19 @@ func RunQueueScheduler(ctx context.Context, service *MonitorService, queue JobQu
 			return
 		case <-ticker.C:
 		}
+	}
+}
+
+func queueTopologyLossHandler(service *MonitorService, logger *slog.Logger) func(context.Context) error {
+	return func(ctx context.Context) error {
+		recovered, err := service.RecoverQueuedJobsAfterTopologyLoss(ctx)
+		if err != nil {
+			return err
+		}
+		if recovered > 0 {
+			logger.Warn("Recovered queued jobs after RabbitMQ topology loss", "jobs", recovered)
+		}
+		return nil
 	}
 }
 

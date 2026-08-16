@@ -288,7 +288,7 @@ func TestMonitorStoreReclaimsStaleScheduledJob(t *testing.T) {
 	}
 }
 
-func TestMonitorStoreReclaimsStaleQueuedJob(t *testing.T) {
+func TestMonitorStoreRecoversQueuedJobOnlyAfterTopologyLoss(t *testing.T) {
 	cfg := testCheckerConfig(t)
 	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}
 	store := NewMonitorStore(NewNetworkPolicy(cfg))
@@ -313,15 +313,19 @@ func TestMonitorStoreReclaimsStaleQueuedJob(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if early := store.ClaimDueJobs(1, now.Add(leaseTimeout-time.Millisecond), leaseTimeout); len(early) != 0 {
-		t.Fatalf("early queued reclaim = %+v, want none", early)
+	if replayed := store.ClaimDueJobs(1, now.Add(5*leaseTimeout), leaseTimeout); len(replayed) != 0 {
+		t.Fatalf("time-based queued replay = %+v, want none", replayed)
 	}
-	reclaimed := store.ClaimDueJobs(1, now.Add(leaseTimeout), leaseTimeout)
+	recoveryTime := now.Add(5 * leaseTimeout)
+	if recovered := store.RecoverQueuedJobsAfterTopologyLoss(recoveryTime); recovered != 1 {
+		t.Fatalf("recovered queued jobs = %d, want 1", recovered)
+	}
+	reclaimed := store.ClaimDueJobs(1, recoveryTime, leaseTimeout)
 	if len(reclaimed) != 1 || reclaimed[0].ID != claimed[0].ID {
 		t.Fatalf("reclaimed = %+v, want queued job %s", reclaimed, claimed[0].ID)
 	}
-	if reclaimed[0].LastError != "queued delivery lease expired" {
-		t.Fatalf("last error = %q, want queued delivery lease expiry", reclaimed[0].LastError)
+	if reclaimed[0].LastError != "rabbitmq queue topology was lost" {
+		t.Fatalf("last error = %q, want RabbitMQ topology loss", reclaimed[0].LastError)
 	}
 }
 
