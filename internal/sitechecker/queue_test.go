@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -52,6 +53,19 @@ func TestInMemoryQueueDeduplicatesPublishedJobs(t *testing.T) {
 	case delivery := <-deliveries:
 		t.Fatalf("unexpected duplicate delivery: %+v", delivery.Job)
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestDialRabbitMQRedactsMalformedURL(t *testing.T) {
+	secret := "SUPER_SECRET_PASSWORD"
+	rawURL := "amqp://user:" + secret + "@rabbit/%zz"
+
+	_, err := dialRabbitMQ(context.Background(), rawURL, time.Second, time.Second)
+	if err == nil {
+		t.Fatal("dialRabbitMQ returned nil error for malformed URL")
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), rawURL) {
+		t.Fatalf("dialRabbitMQ error leaked credentials or raw URL: %v", err)
 	}
 }
 

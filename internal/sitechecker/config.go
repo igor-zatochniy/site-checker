@@ -390,7 +390,7 @@ func envPorts(key, defaultValue string, errs *[]error) map[int]struct{} {
 func validateHTTPURLShape(raw string) error {
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return err
+		return errors.New("invalid URL syntax")
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return fmt.Errorf("scheme must be http or https")

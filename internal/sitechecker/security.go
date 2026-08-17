@@ -289,6 +289,7 @@ var blockedNetworkPrefixes = []netip.Prefix{
 	mustPrefix("240.0.0.0/4"),
 	mustPrefix("::/128"),
 	mustPrefix("2001:db8::/32"),
+	mustPrefix("64:ff9b:1::/48"),
 	mustPrefix("ff00::/8"),
 }
 

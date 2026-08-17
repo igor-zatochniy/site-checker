@@ -156,6 +156,47 @@ func TestNetworkPolicyBlocksPrivateAndMetadataAddresses(t *testing.T) {
 	}
 }
 
+func TestNetworkPolicyBlocksLocalUseNAT64Prefix(t *testing.T) {
+	policy := NewNetworkPolicy(Config{
+		MaxRedirects: 3,
+		AllowedPorts: map[int]struct{}{80: {}, 443: {}},
+	})
+	translatedPrivateIP := netip.MustParseAddr("64:ff9b:1:fffe::a00:1")
+
+	if policy.IsAllowedIP(translatedPrivateIP) {
+		t.Fatal("local-use NAT64 address was allowed")
+	}
+	if err := policy.ValidateURL("http://[64:ff9b:1:fffe::a00:1]/"); err == nil {
+		t.Fatal("NAT64 literal URL was allowed")
+	}
+
+	policy.resolver = &sequenceIPResolver{answers: [][]netip.Addr{
+		{translatedPrivateIP},
+		{translatedPrivateIP},
+	}}
+	if _, err := policy.ResolveAllowedIPs(t.Context(), "nat64.example"); err == nil {
+		t.Fatal("DNS result from local-use NAT64 prefix was allowed")
+	}
+	redirectURL, err := url.Parse("http://nat64.example/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.CheckRedirect(&http.Request{URL: redirectURL}, []*http.Request{{}}); err != nil {
+		t.Fatalf("syntactically valid NAT64 redirect was rejected before DNS: %v", err)
+	}
+	if _, err := policy.DialContext(t.Context(), "tcp", "nat64.example:80"); err == nil {
+		t.Fatal("redirect hostname resolving to local-use NAT64 address was dialed")
+	}
+
+	trustedPolicy := NewNetworkPolicy(Config{
+		AllowPrivateNetworks: true,
+		AllowedPorts:         map[int]struct{}{80: {}, 443: {}},
+	})
+	if !trustedPolicy.IsAllowedIP(translatedPrivateIP) {
+		t.Fatal("trusted private-network policy unexpectedly blocked NAT64 address")
+	}
+}
+
 func TestNetworkPolicyAllowsPublicHTTPAndHTTPS(t *testing.T) {
 	policy := NewNetworkPolicy(Config{AllowedPorts: map[int]struct{}{80: {}, 443: {}}})
 

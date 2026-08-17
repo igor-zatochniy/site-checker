@@ -66,6 +66,38 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  name: site-checker-background-metrics-ingress
+  namespace: site-checker
+  labels:
+    app.kubernetes.io/name: site-checker
+    app.kubernetes.io/component: observability
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - site-checker
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          - scheduler
+          - worker
+          - alert-dispatcher
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
   name: site-checker-rabbitmq-ingress
   namespace: site-checker
   labels:

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"net/url"
 	"sync"
 	"time"
 
@@ -310,7 +311,7 @@ func (q *RabbitMQQueue) recoverDetectedTopologyLoss(ctx context.Context) error {
 
 func dialRabbitMQ(ctx context.Context, rawURL string, connectTimeout, writeTimeout time.Duration) (*amqp.Connection, error) {
 	dialer := &net.Dialer{Timeout: connectTimeout}
-	return amqp.DialConfig(rawURL, amqp.Config{
+	connection, err := amqp.DialConfig(rawURL, amqp.Config{
 		Dial: func(network, address string) (net.Conn, error) {
 			conn, err := dialer.DialContext(ctx, network, address)
 			if err != nil {
@@ -328,6 +329,21 @@ func dialRabbitMQ(ctx context.Context, rawURL string, connectTimeout, writeTimeo
 			return deadlineConn, nil
 		},
 	})
+	if err != nil {
+		return nil, sanitizeURLParseError(err)
+	}
+	return connection, nil
+}
+
+func sanitizeURLParseError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		return urlErr.Err
+	}
+	return err
 }
 
 func (c *rabbitMQDeadlineConn) SetDeadline(deadline time.Time) error {

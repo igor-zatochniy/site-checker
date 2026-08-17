@@ -411,6 +411,26 @@ func TestLoadConfigRequiresPostgresForAlerts(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRedactsMalformedAlertWebhookURL(t *testing.T) {
+	cleanConfigEnv(t)
+	t.Setenv("STORAGE_TYPE", "postgres")
+	t.Setenv("DATABASE_URL", "postgres://user:pass@example.com:5432/site_checker")
+	secretPath := "SECRET_PATH"
+	secretQuery := "SECRET_QUERY"
+	t.Setenv("ALERT_WEBHOOK_URL", "https://alerts.example.com/webhooks/"+secretPath+"%zz?token="+secretQuery)
+
+	_, err := LoadConfig()
+	if err == nil {
+		t.Fatal("LoadConfig returned nil error for malformed webhook URL")
+	}
+	if strings.Contains(err.Error(), secretPath) || strings.Contains(err.Error(), secretQuery) {
+		t.Fatalf("LoadConfig error leaked webhook URL: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ALERT_WEBHOOK_URL") {
+		t.Fatalf("LoadConfig error lost configuration context: %v", err)
+	}
+}
+
 func TestLoadConfigValidatesRetentionConfiguration(t *testing.T) {
 	t.Run("requires PostgreSQL", func(t *testing.T) {
 		cleanConfigEnv(t)
