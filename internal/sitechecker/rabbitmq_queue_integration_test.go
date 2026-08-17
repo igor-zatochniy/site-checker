@@ -191,6 +191,30 @@ func TestRabbitMQQueueRetriesAndDeadLetters(t *testing.T) {
 		t.Fatalf("ack after RabbitMQ restart: %v", err)
 	}
 
+	if err := unbindRabbitDeadLetterQueue(queue.url, queue.dlqName); err != nil {
+		t.Fatalf("remove only RabbitMQ dead-letter binding: %v", err)
+	}
+	if err := queue.Ping(brokerRestartCtx); err != nil {
+		t.Fatalf("repair isolated dead-letter binding: %v", err)
+	}
+	bindingJob := CheckJobMessage{
+		JobID:      "job_integration_repair_isolated_binding",
+		MonitorID:  "mon_integration",
+		Attempt:    2,
+		EnqueuedAt: time.Now().UTC(),
+	}
+	if err := queue.Publish(brokerRestartCtx, bindingJob); err != nil {
+		t.Fatalf("publish after isolated dead-letter binding recovery: %v", err)
+	}
+	bindingDelivery := receiveRabbitDelivery(t, deliveries)
+	if err := bindingDelivery.Nack(brokerRestartCtx, false); err != nil {
+		t.Fatalf("terminal nack after isolated dead-letter binding recovery: %v", err)
+	}
+	bindingDeadLetter := receiveRabbitDeadLetter(t, brokerRestartCtx, queue)
+	if bindingDeadLetter.JobID != bindingJob.JobID {
+		t.Fatalf("dead-letter after isolated binding recovery = %q, want %q", bindingDeadLetter.JobID, bindingJob.JobID)
+	}
+
 	if err := deleteRabbitQueue(queue.url, queue.dlqName); err != nil {
 		t.Fatalf("delete only RabbitMQ dead-letter queue: %v", err)
 	}
@@ -392,4 +416,18 @@ func receiveRabbitDeadLetter(t *testing.T, ctx context.Context, queue *RabbitMQQ
 	}
 	t.Fatal("timed out waiting for RabbitMQ dead-letter job")
 	return CheckJobMessage{}
+}
+
+func unbindRabbitDeadLetterQueue(rawURL, queueName string) error {
+	connection, err := amqp.Dial(rawURL)
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	channel, err := connection.Channel()
+	if err != nil {
+		return err
+	}
+	defer channel.Close()
+	return channel.QueueUnbind(queueName, queueName, "site_checker.dlx", nil)
 }

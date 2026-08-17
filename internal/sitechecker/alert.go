@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -102,7 +103,7 @@ func (s *AlertSender) Send(ctx context.Context, event AlertOutboxEvent) error {
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("send alert: %w", err)
+		return fmt.Errorf("send alert: %w", alertTransportCause(err))
 	}
 	defer resp.Body.Close()
 	_, _ = io.CopyN(io.Discard, resp.Body, 4*1024)
@@ -115,6 +116,14 @@ func (s *AlertSender) Send(ctx context.Context, event AlertOutboxEvent) error {
 		}
 	}
 	return nil
+}
+
+func alertTransportCause(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		return urlErr.Err
+	}
+	return err
 }
 
 func isPermanentAlertStatus(statusCode int) bool {

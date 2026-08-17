@@ -224,6 +224,8 @@ docker run --rm \
   site-checker
 ```
 
+The image-level Docker `HEALTHCHECK` probes `http://127.0.0.1:8080/healthz`. Keep `HEALTH_ADDR=:8080` when relying on that check. For a headless background role or a custom listener, replace the container healthcheck or start it with `--no-healthcheck`; Kubernetes deployments use their own probes.
+
 ## Kubernetes
 
 Manifests live in:

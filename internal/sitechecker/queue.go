@@ -395,6 +395,9 @@ func (q *RabbitMQQueue) Ping(ctx context.Context) error {
 		}
 		return nil
 	}
+	if err := q.bindDeadLetterQueue(channel); err != nil {
+		return fmt.Errorf("ensure rabbitmq dead-letter binding: %w", err)
+	}
 	return q.recoverDetectedTopologyLoss(ctx)
 }
 
@@ -425,10 +428,11 @@ func (q *RabbitMQQueue) declareDeadLetterTopology(channel *amqp.Channel) error {
 	if _, err := channel.QueueDeclare(q.dlqName, true, false, false, false, nil); err != nil {
 		return err
 	}
-	if err := channel.QueueBind(q.dlqName, q.dlqName, "site_checker.dlx", false, nil); err != nil {
-		return err
-	}
-	return nil
+	return q.bindDeadLetterQueue(channel)
+}
+
+func (q *RabbitMQQueue) bindDeadLetterQueue(channel *amqp.Channel) error {
+	return channel.QueueBind(q.dlqName, q.dlqName, "site_checker.dlx", false, nil)
 }
 
 func (q *RabbitMQQueue) repairTopology(ctx context.Context) error {

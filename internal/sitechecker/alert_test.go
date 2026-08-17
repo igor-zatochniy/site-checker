@@ -1,12 +1,15 @@
 package sitechecker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -119,6 +122,64 @@ func TestAlertSenderRejectsRedirectWithoutChangingPOSTToGET(t *testing.T) {
 	}
 	if redirectedRequests.Load() != 0 {
 		t.Fatalf("redirect target received %d requests, want 0", redirectedRequests.Load())
+	}
+}
+
+func TestAlertTransportErrorDoesNotLeakWebhookSecret(t *testing.T) {
+	const (
+		secretPath  = "SECRET_PATH"
+		secretQuery = "SECRET_QUERY"
+	)
+	webhookURL := "https://hooks.example.invalid/webhooks/" + secretPath + "?token=" + secretQuery
+	client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("dial tcp: connection refused")
+	})}
+	sender := NewAlertSender(webhookURL, "site-checker-test", client)
+	event := AlertOutboxEvent{
+		ID:             "event-secret-redaction",
+		IdempotencyKey: "incident-secret:failure:1",
+		AttemptCount:   1,
+		LeaseToken:     "lease-secret-redaction",
+	}
+
+	sendErr := sender.Send(t.Context(), event)
+	if sendErr == nil {
+		t.Fatal("Send returned nil for transport error")
+	}
+	if !strings.Contains(sendErr.Error(), "connection refused") {
+		t.Fatalf("sanitized transport error lost its cause: %v", sendErr)
+	}
+
+	repo := &recordingAlertOutboxRepository{events: []AlertOutboxEvent{event}}
+	cfg := Config{
+		AlertDispatchBatchSize:   1,
+		AlertLeaseTimeout:        time.Minute,
+		AlertDeliveryTimeout:     time.Second,
+		AlertMaxAttempts:         3,
+		AlertRetryInitialBackoff: time.Second,
+		AlertRetryMaxBackoff:     time.Minute,
+	}
+	var logOutput bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logOutput, nil))
+	metrics := NewMetrics("test", "commit", "date", 0)
+	if _, err := dispatchAlertBatch(t.Context(), repo, sender, cfg, metrics, logger); err != nil {
+		t.Fatal(err)
+	}
+	if repo.failedID != event.ID || repo.failedDead {
+		t.Fatalf("persisted failure = id:%q dead:%t, want retryable %s", repo.failedID, repo.failedDead, event.ID)
+	}
+
+	values := map[string]string{
+		"sender error":         sendErr.Error(),
+		"persisted last_error": repo.failedError,
+		"structured log":       logOutput.String(),
+	}
+	for label, value := range values {
+		for _, secret := range []string{secretPath, secretQuery} {
+			if strings.Contains(value, secret) {
+				t.Fatalf("%s leaked webhook secret %q: %s", label, secret, value)
+			}
+		}
 	}
 }
 
@@ -298,6 +359,7 @@ type recordingAlertOutboxRepository struct {
 	deliveredID        string
 	failedID           string
 	failedLease        string
+	failedError        string
 	failedRetryDelay   time.Duration
 	failedDead         bool
 	claimedMaxAttempts int
@@ -313,10 +375,17 @@ func (r *recordingAlertOutboxRepository) MarkAlertDelivered(_ context.Context, i
 	return nil
 }
 
-func (r *recordingAlertOutboxRepository) MarkAlertFailed(_ context.Context, id, leaseToken, _ string, retryDelay time.Duration, dead bool) error {
+func (r *recordingAlertOutboxRepository) MarkAlertFailed(_ context.Context, id, leaseToken, lastError string, retryDelay time.Duration, dead bool) error {
 	r.failedID = id
 	r.failedLease = leaseToken
+	r.failedError = lastError
 	r.failedRetryDelay = retryDelay
 	r.failedDead = dead
 	return nil
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }
