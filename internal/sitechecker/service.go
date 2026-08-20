@@ -34,7 +34,7 @@ func (s *MonitorService) Create(ctx context.Context, input MonitorInput) (Monito
 	if err != nil {
 		return Monitor{}, err
 	}
-	s.updateTotalLinks(ctx)
+	s.metrics.AdjustTotalLinks(1)
 	return monitor, nil
 }
 
@@ -47,14 +47,23 @@ func (s *MonitorService) Get(ctx context.Context, id string) (Monitor, error) {
 }
 
 func (s *MonitorService) Update(ctx context.Context, id string, patch MonitorPatch) (Monitor, error) {
-	return s.repo.Update(ctx, id, patch)
+	monitor, err := s.repo.Update(ctx, id, patch)
+	if err != nil {
+		return Monitor{}, err
+	}
+	if patch.URL != nil || patch.TimeoutSeconds != nil || patch.ExpectedStatus != nil ||
+		(patch.Enabled != nil && !*patch.Enabled) {
+		s.metrics.RemoveMonitor(id)
+	}
+	return monitor, nil
 }
 
 func (s *MonitorService) Delete(ctx context.Context, id string) error {
 	if err := s.repo.Delete(ctx, id); err != nil {
 		return err
 	}
-	s.updateTotalLinks(ctx)
+	s.metrics.AdjustTotalLinks(-1)
+	s.metrics.RemoveMonitor(id)
 	return nil
 }
 

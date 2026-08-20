@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -19,29 +20,46 @@ const (
 )
 
 type APIHandler struct {
-	service *MonitorService
-	apiKey  string
-	logger  *slog.Logger
+	service        *MonitorService
+	apiKey         string
+	logger         *slog.Logger
+	requestTimeout time.Duration
 }
 
 func NewAPIHandler(service *MonitorService, apiKey string, logger *slog.Logger) *APIHandler {
+	return NewAPIHandlerWithTimeout(service, apiKey, logger, defaultDatabaseOperationTimeout)
+}
+
+func NewAPIHandlerWithTimeout(service *MonitorService, apiKey string, logger *slog.Logger, requestTimeout time.Duration) *APIHandler {
+	if requestTimeout <= 0 {
+		requestTimeout = defaultDatabaseOperationTimeout
+	}
 	return &APIHandler{
-		service: service,
-		apiKey:  apiKey,
-		logger:  logger,
+		service:        service,
+		apiKey:         apiKey,
+		logger:         logger,
+		requestTimeout: requestTimeout,
 	}
 }
 
 func (h *APIHandler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/v1/monitors", h.requireAPIKey(h.createMonitor))
-	mux.HandleFunc("GET /api/v1/monitors", h.requireAPIKey(h.listMonitors))
-	mux.HandleFunc("GET /api/v1/monitors/{id}", h.requireAPIKey(h.getMonitor))
-	mux.HandleFunc("PATCH /api/v1/monitors/{id}", h.requireAPIKey(h.updateMonitor))
-	mux.HandleFunc("DELETE /api/v1/monitors/{id}", h.requireAPIKey(h.deleteMonitor))
-	mux.HandleFunc("GET /api/v1/monitors/{id}/checks", h.requireAPIKey(h.listChecks))
-	mux.HandleFunc("POST /api/v1/monitors/{id}/check", h.requireAPIKey(h.runManualCheck))
-	mux.HandleFunc("GET /api/v1/monitors/{id}/stats", h.requireAPIKey(h.getStats))
-	mux.HandleFunc("GET /api/v1/incidents", h.requireAPIKey(h.listIncidents))
+	mux.HandleFunc("POST /api/v1/monitors", h.requireAPIKey(h.withRequestTimeout(h.createMonitor)))
+	mux.HandleFunc("GET /api/v1/monitors", h.requireAPIKey(h.withRequestTimeout(h.listMonitors)))
+	mux.HandleFunc("GET /api/v1/monitors/{id}", h.requireAPIKey(h.withRequestTimeout(h.getMonitor)))
+	mux.HandleFunc("PATCH /api/v1/monitors/{id}", h.requireAPIKey(h.withRequestTimeout(h.updateMonitor)))
+	mux.HandleFunc("DELETE /api/v1/monitors/{id}", h.requireAPIKey(h.withRequestTimeout(h.deleteMonitor)))
+	mux.HandleFunc("GET /api/v1/monitors/{id}/checks", h.requireAPIKey(h.withRequestTimeout(h.listChecks)))
+	mux.HandleFunc("POST /api/v1/monitors/{id}/check", h.requireAPIKey(h.withRequestTimeout(h.runManualCheck)))
+	mux.HandleFunc("GET /api/v1/monitors/{id}/stats", h.requireAPIKey(h.withRequestTimeout(h.getStats)))
+	mux.HandleFunc("GET /api/v1/incidents", h.requireAPIKey(h.withRequestTimeout(h.listIncidents)))
+}
+
+func (h *APIHandler) withRequestTimeout(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), h.requestTimeout)
+		defer cancel()
+		next(w, r.WithContext(ctx))
+	}
 }
 
 func (h *APIHandler) createMonitor(w http.ResponseWriter, r *http.Request) {

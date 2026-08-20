@@ -321,7 +321,7 @@ Expected demonstration:
 | `APP_ROLE` | `all` | Runtime role: `all`, `api`, `scheduler`, `worker`, or `alert-dispatcher`. |
 | `STORAGE_TYPE` | `memory` or `postgres` when `DATABASE_URL` is set | Storage backend. Production and split `api`/`scheduler`/`worker` roles require PostgreSQL. |
 | `DATABASE_URL` | empty | PostgreSQL connection string. Required for `STORAGE_TYPE=postgres`. |
-| `DATABASE_OPERATION_TIMEOUT` | `15s` | Upper bound for each PostgreSQL runtime operation, including scheduler, worker, API, and alert state transitions. |
+| `DATABASE_OPERATION_TIMEOUT` | `15s` | Upper bound for each PostgreSQL runtime operation and API request business logic. The HTTP response write timeout is always configured with an additional safety margin. |
 | `DATABASE_MIGRATION_TIMEOUT` | `2m` | Upper bound for PostgreSQL pool initialization and startup migrations. |
 | `RUN_MIGRATIONS` | `true` | Runs embedded SQL migrations on startup. |
 | `API_KEY` | empty | API key with at least 24 characters. Required for `api` and `all` roles unless local authentication is explicitly disabled. |
@@ -363,7 +363,7 @@ Expected demonstration:
 | `ALERT_MAX_ATTEMPTS` | `8` | Delivery attempts before an outbox event is marked `dead`. |
 | `ALERT_RETRY_INITIAL_BACKOFF` | `1s` | Initial persisted retry delay. |
 | `ALERT_RETRY_MAX_BACKOFF` | `5m` | Maximum exponential retry backoff. A valid webhook `Retry-After` response may extend the persisted delay up to 24 hours. |
-| `RETENTION_ENABLED` | `false` | Enables PostgreSQL history cleanup. Allowed only for `all` or `scheduler` roles and explicitly enabled by the supplied scheduler deployments. |
+| `RETENTION_ENABLED` | `false` | Enables PostgreSQL history cleanup. Allowed only for `all` or `scheduler` roles, required for production `all`, and explicitly enabled by the supplied scheduler deployments. |
 | `RETENTION_INTERVAL` | `1m` | Delay between bounded cleanup passes. |
 | `RETENTION_BATCH_SIZE` | `10000` | Maximum rows deleted from each retained table in one pass. |
 | `CHECK_RESULTS_RETENTION` | `2160h` | Retains check results for 90 days. |

@@ -50,7 +50,7 @@ func runApplication(parentCtx context.Context, version, commit, buildDate string
 		}
 	}
 
-	metrics := NewMetrics(version, commit, buildDate, 0)
+	metrics := NewMetricsForRole(version, commit, buildDate, 0, cfg.AppRole)
 	repo, closeRepo, err := NewConfiguredRepository(ctx, cfg, policy, logger)
 	if err != nil {
 		return fmt.Errorf("initialize repository: %w", err)
@@ -74,7 +74,7 @@ func runApplication(parentCtx context.Context, version, commit, buildDate string
 	}
 	service := NewMonitorService(repo, checker, metrics, alertPolicy, logger)
 	service.updateTotalLinks(ctx)
-	api := NewAPIHandler(service, cfg.APIKey, logger)
+	api := NewAPIHandlerWithTimeout(service, cfg.APIKey, logger, cfg.DatabaseOperationTimeout)
 	var retentionRepo RetentionRepository
 	if cfg.RetentionEnabled {
 		var ok bool

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestObservabilityEndpoints(t *testing.T) {
@@ -35,6 +36,17 @@ func TestObservabilityEndpoints(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("GET %s status = %d, want 200", path, resp.StatusCode)
 		}
+	}
+}
+
+func TestHTTPWriteTimeoutExceedsAPIRequestBudget(t *testing.T) {
+	cfg := Config{DatabaseOperationTimeout: 15 * time.Second}
+	server := NewObservabilityServer(":0", cfg, NewMetrics("test", "commit", "date", 0))
+	if server.WriteTimeout <= cfg.DatabaseOperationTimeout {
+		t.Fatalf("WriteTimeout = %s, must exceed API request budget %s", server.WriteTimeout, cfg.DatabaseOperationTimeout)
+	}
+	if margin := server.WriteTimeout - cfg.DatabaseOperationTimeout; margin < httpResponseWriteMargin {
+		t.Fatalf("write margin = %s, want at least %s", margin, httpResponseWriteMargin)
 	}
 }
 

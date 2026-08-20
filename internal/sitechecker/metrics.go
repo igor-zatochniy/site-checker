@@ -12,6 +12,7 @@ const maxTrackedMetricMonitors = 10_000
 
 type Metrics struct {
 	mu                   sync.RWMutex
+	monitorStateEnabled  bool
 	startedAt            time.Time
 	version              string
 	commit               string
@@ -67,7 +68,16 @@ type MetricsSnapshot struct {
 }
 
 func NewMetrics(version, commit, buildDate string, totalLinks int) *Metrics {
+	return newMetrics(version, commit, buildDate, totalLinks, true)
+}
+
+func NewMetricsForRole(version, commit, buildDate string, totalLinks int, appRole string) *Metrics {
+	return newMetrics(version, commit, buildDate, totalLinks, appRole == "all")
+}
+
+func newMetrics(version, commit, buildDate string, totalLinks int, monitorStateEnabled bool) *Metrics {
 	return &Metrics{
+		monitorStateEnabled: monitorStateEnabled,
 		startedAt:           time.Now(),
 		version:             version,
 		commit:              commit,
@@ -86,6 +96,38 @@ func (m *Metrics) SetTotalLinks(totalLinks int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.totalLinks = totalLinks
+}
+
+func (m *Metrics) AdjustTotalLinks(delta int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.totalLinks = max(m.totalLinks+delta, 0)
+}
+
+func (m *Metrics) RemoveMonitor(monitorID string) {
+	if monitorID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.monitorStateEnabled {
+		return
+	}
+	delete(m.statusByMonitor, monitorID)
+	delete(m.upByMonitor, monitorID)
+	delete(m.consecutiveFailures, monitorID)
+	if _, exists := m.trackedMonitors[monitorID]; !exists {
+		return
+	}
+	delete(m.trackedMonitors, monitorID)
+	for index := m.trackedMonitorHead; index < len(m.trackedMonitorOrder); index++ {
+		if m.trackedMonitorOrder[index] != monitorID {
+			continue
+		}
+		copy(m.trackedMonitorOrder[index:], m.trackedMonitorOrder[index+1:])
+		m.trackedMonitorOrder = m.trackedMonitorOrder[:len(m.trackedMonitorOrder)-1]
+		break
+	}
 }
 
 func (m *Metrics) RecordScheduled() {
@@ -138,7 +180,7 @@ func (m *Metrics) RecordResult(result CheckResult, recordedAt time.Time) {
 	m.lastCheckAt = recordedAt.UTC()
 	m.durationSumSeconds += result.Duration.Seconds()
 	m.durationCount++
-	if result.MonitorID != "" {
+	if m.monitorStateEnabled && result.MonitorID != "" {
 		m.trackMonitorLocked(result.MonitorID)
 		m.statusByMonitor[result.MonitorID] = result.StatusCode
 		m.upByMonitor[result.MonitorID] = result.Healthy
@@ -147,14 +189,14 @@ func (m *Metrics) RecordResult(result CheckResult, recordedAt time.Time) {
 	if result.Healthy {
 		m.healthyTotal++
 		m.lastSuccessAt = recordedAt.UTC()
-		if result.MonitorID != "" {
+		if m.monitorStateEnabled && result.MonitorID != "" {
 			m.consecutiveFailures[result.MonitorID] = 0
 		}
 		return
 	}
 
 	m.unhealthyTotal++
-	if result.MonitorID != "" {
+	if m.monitorStateEnabled && result.MonitorID != "" {
 		m.consecutiveFailures[result.MonitorID]++
 	}
 	if result.Error != "" {
@@ -245,7 +287,9 @@ func (m *Metrics) Prometheus() string {
 	builder.WriteString(escapeLabelValue(snapshot.BuildDate))
 	builder.WriteString(`"} 1` + "\n")
 
-	writeMetric("site_checker_links_total", "Number of configured URLs.", "gauge", snapshot.TotalLinks)
+	if m.monitorStateEnabled {
+		writeMetric("site_checker_links_total", "Number of configured URLs.", "gauge", snapshot.TotalLinks)
+	}
 	writeMetric("site_checker_checks_total", "Total completed checks.", "counter", snapshot.ChecksTotal)
 	writeMetric("site_checker_checks_healthy_total", "Total checks matching the expected status policy.", "counter", snapshot.HealthyTotal)
 	writeMetric("site_checker_checks_unhealthy_total", "Total checks outside the expected status policy.", "counter", snapshot.UnhealthyTotal)
@@ -262,38 +306,40 @@ func (m *Metrics) Prometheus() string {
 	writeMetric("site_checker_last_check_timestamp_seconds", "Unix timestamp of the last completed check.", "gauge", unixSeconds(snapshot.LastCheckAt))
 	writeMetric("site_checker_last_success_timestamp_seconds", "Unix timestamp of the last successful check.", "gauge", unixSeconds(snapshot.LastSuccessAt))
 
-	monitorIDs := make([]string, 0, len(snapshot.UpByMonitor))
-	for monitorID := range snapshot.UpByMonitor {
-		monitorIDs = append(monitorIDs, monitorID)
-	}
-	sort.Strings(monitorIDs)
-	builder.WriteString("# HELP site_checker_site_up Last known site health by monitor ID.\n")
-	builder.WriteString("# TYPE site_checker_site_up gauge\n")
-	builder.WriteString("# HELP site_checker_site_status_code Last observed HTTP status code by monitor ID.\n")
-	builder.WriteString("# TYPE site_checker_site_status_code gauge\n")
-	builder.WriteString("# HELP site_checker_site_consecutive_failures Consecutive failed checks by monitor ID.\n")
-	builder.WriteString("# TYPE site_checker_site_consecutive_failures gauge\n")
-	for _, monitorID := range monitorIDs {
-		upValue := 0
-		if snapshot.UpByMonitor[monitorID] {
-			upValue = 1
+	if m.monitorStateEnabled {
+		monitorIDs := make([]string, 0, len(snapshot.UpByMonitor))
+		for monitorID := range snapshot.UpByMonitor {
+			monitorIDs = append(monitorIDs, monitorID)
 		}
-		label := `monitor_id="` + escapeLabelValue(monitorID) + `"`
-		builder.WriteString("site_checker_site_up{")
-		builder.WriteString(label)
-		builder.WriteString("} ")
-		builder.WriteString(fmt.Sprint(upValue))
-		builder.WriteByte('\n')
-		builder.WriteString("site_checker_site_status_code{")
-		builder.WriteString(label)
-		builder.WriteString("} ")
-		builder.WriteString(fmt.Sprint(snapshot.StatusByMonitor[monitorID]))
-		builder.WriteByte('\n')
-		builder.WriteString("site_checker_site_consecutive_failures{")
-		builder.WriteString(label)
-		builder.WriteString("} ")
-		builder.WriteString(fmt.Sprint(snapshot.ConsecutiveFailures[monitorID]))
-		builder.WriteByte('\n')
+		sort.Strings(monitorIDs)
+		builder.WriteString("# HELP site_checker_site_up Last known site health by monitor ID.\n")
+		builder.WriteString("# TYPE site_checker_site_up gauge\n")
+		builder.WriteString("# HELP site_checker_site_status_code Last observed HTTP status code by monitor ID.\n")
+		builder.WriteString("# TYPE site_checker_site_status_code gauge\n")
+		builder.WriteString("# HELP site_checker_site_consecutive_failures Consecutive failed checks by monitor ID.\n")
+		builder.WriteString("# TYPE site_checker_site_consecutive_failures gauge\n")
+		for _, monitorID := range monitorIDs {
+			upValue := 0
+			if snapshot.UpByMonitor[monitorID] {
+				upValue = 1
+			}
+			label := `monitor_id="` + escapeLabelValue(monitorID) + `"`
+			builder.WriteString("site_checker_site_up{")
+			builder.WriteString(label)
+			builder.WriteString("} ")
+			builder.WriteString(fmt.Sprint(upValue))
+			builder.WriteByte('\n')
+			builder.WriteString("site_checker_site_status_code{")
+			builder.WriteString(label)
+			builder.WriteString("} ")
+			builder.WriteString(fmt.Sprint(snapshot.StatusByMonitor[monitorID]))
+			builder.WriteByte('\n')
+			builder.WriteString("site_checker_site_consecutive_failures{")
+			builder.WriteString(label)
+			builder.WriteString("} ")
+			builder.WriteString(fmt.Sprint(snapshot.ConsecutiveFailures[monitorID]))
+			builder.WriteByte('\n')
+		}
 	}
 
 	dependencies := make([]string, 0, len(snapshot.DependencyUp))

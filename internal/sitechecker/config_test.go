@@ -472,6 +472,24 @@ func TestLoadConfigValidatesRetentionConfiguration(t *testing.T) {
 			t.Fatal("RetentionEnabled = false, want true")
 		}
 	})
+
+	t.Run("requires retention for production all", func(t *testing.T) {
+		cleanConfigEnv(t)
+		t.Setenv("APP_ENV", "production")
+		t.Setenv("APP_ROLE", "all")
+		t.Setenv("STORAGE_TYPE", "postgres")
+		t.Setenv("DATABASE_URL", "postgres://user:pass@example.com:5432/site_checker")
+		t.Setenv("QUEUE_TYPE", "rabbitmq")
+		t.Setenv("RABBITMQ_URL", "amqp://user:pass@example.com:5672/")
+
+		if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "RETENTION_ENABLED") {
+			t.Fatalf("LoadConfig error = %v, want production retention requirement", err)
+		}
+		t.Setenv("RETENTION_ENABLED", "true")
+		if _, err := LoadConfig(); err != nil {
+			t.Fatalf("LoadConfig returned error with retention enabled: %v", err)
+		}
+	})
 }
 
 func TestLoadConfigRejectsInvalidValues(t *testing.T) {

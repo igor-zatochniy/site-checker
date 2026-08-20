@@ -263,6 +263,9 @@ func LoadConfig() (Config, error) {
 	if cfg.AppEnv == "production" && roleEnabled(cfg.AppRole, "scheduler") && cfg.QueueType != "rabbitmq" {
 		errs = append(errs, errors.New("QUEUE_TYPE=rabbitmq is required for scheduler-enabled production roles"))
 	}
+	if cfg.AppEnv == "production" && cfg.AppRole == "all" && !cfg.RetentionEnabled {
+		errs = append(errs, errors.New("RETENTION_ENABLED=true is required for APP_ROLE=all in production"))
+	}
 	if cfg.AppEnv == "production" && cfg.EnablePprof {
 		errs = append(errs, errors.New("ENABLE_PPROF=true is not allowed in production"))
 	}

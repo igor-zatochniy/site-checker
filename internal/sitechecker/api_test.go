@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -210,6 +211,57 @@ func TestAPIRequiresAPIKeyWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestAPIRequestBudgetPreventsHiddenMutation(t *testing.T) {
+	tests := []struct {
+		name          string
+		requestBudget time.Duration
+		repoDelay     time.Duration
+		wantStatus    int
+		wantCommit    bool
+	}{
+		{
+			name:          "mutation completes inside request budget",
+			requestBudget: 250 * time.Millisecond,
+			repoDelay:     25 * time.Millisecond,
+			wantStatus:    http.StatusCreated,
+			wantCommit:    true,
+		},
+		{
+			name:          "mutation is canceled before request budget expires",
+			requestBudget: 40 * time.Millisecond,
+			repoDelay:     250 * time.Millisecond,
+			wantStatus:    http.StatusServiceUnavailable,
+			wantCommit:    false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repo := &delayedCreateRepository{delay: test.repoDelay}
+			metrics := NewMetrics("test", "commit", "date", 0)
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			service := NewMonitorService(repo, nil, metrics, AlertPolicy{}, logger)
+			api := NewAPIHandlerWithTimeout(service, "", logger, test.requestBudget)
+			cfg := Config{DatabaseOperationTimeout: test.requestBudget}
+			serverConfig := NewObservabilityServer(":0", cfg, metrics, api.Register)
+			server := httptest.NewUnstartedServer(serverConfig.Handler)
+			server.Config.WriteTimeout = serverConfig.WriteTimeout
+			server.Start()
+			defer server.Close()
+
+			body := `{"url":"https://example.com","interval_seconds":60,"timeout_seconds":5,"expected_status":200}`
+			resp := apiRequest(t, server.URL+"/api/v1/monitors", http.MethodPost, body)
+			defer resp.Body.Close()
+			if resp.StatusCode != test.wantStatus {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, test.wantStatus)
+			}
+			if repo.committed.Load() != test.wantCommit {
+				t.Fatalf("committed = %t, want %t", repo.committed.Load(), test.wantCommit)
+			}
+		})
+	}
+}
+
 func apiRequest(t *testing.T, url, method, body string) *http.Response {
 	t.Helper()
 	var reader io.Reader
@@ -240,6 +292,31 @@ func decodeResponse(t *testing.T, resp *http.Response, target any) {
 
 type failingMonitorRepository struct {
 	err error
+}
+
+type delayedCreateRepository struct {
+	MonitorRepository
+	delay     time.Duration
+	committed atomic.Bool
+}
+
+func (r *delayedCreateRepository) Create(ctx context.Context, input MonitorInput) (Monitor, error) {
+	timer := time.NewTimer(r.delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return Monitor{}, ctx.Err()
+	case <-timer.C:
+		r.committed.Store(true)
+		return Monitor{
+			ID:              "mon_delayed",
+			URL:             input.URL,
+			IntervalSeconds: input.IntervalSeconds,
+			TimeoutSeconds:  input.TimeoutSeconds,
+			ExpectedStatus:  input.ExpectedStatus,
+			Enabled:         true,
+		}, nil
+	}
 }
 
 func (r failingMonitorRepository) Ping(context.Context) error { return r.err }

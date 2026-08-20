@@ -14,6 +14,11 @@ type ReadinessDependency struct {
 	Check func(ctx context.Context) error
 }
 
+const (
+	defaultHTTPWriteTimeout = 10 * time.Second
+	httpResponseWriteMargin = 5 * time.Second
+)
+
 func NewObservabilityServer(addr string, cfg Config, metrics *Metrics, registrars ...func(*http.ServeMux)) *http.Server {
 	return NewObservabilityServerWithDependencies(addr, cfg, metrics, nil, registrars...)
 }
@@ -59,10 +64,18 @@ func NewObservabilityServerWithDependencies(addr string, cfg Config, metrics *Me
 		Handler:           mux,
 		ReadTimeout:       10 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
-		WriteTimeout:      10 * time.Second,
+		WriteTimeout:      responseWriteTimeout(cfg),
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    int(cfg.MaxHeaderBytes),
 	}
+}
+
+func responseWriteTimeout(cfg Config) time.Duration {
+	requestTimeout := cfg.DatabaseOperationTimeout
+	if requestTimeout <= 0 {
+		requestTimeout = defaultDatabaseOperationTimeout
+	}
+	return max(defaultHTTPWriteTimeout, requestTimeout+httpResponseWriteMargin)
 }
 
 func checkReadinessDependencies(ctx context.Context, metrics *Metrics, dependencies []ReadinessDependency) map[string]string {
