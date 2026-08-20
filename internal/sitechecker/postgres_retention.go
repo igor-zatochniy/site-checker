@@ -9,6 +9,8 @@ import (
 )
 
 func (r *PostgresMonitorRepository) DeleteExpiredData(ctx context.Context, _ time.Time, policy RetentionPolicy) (RetentionResult, error) {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	if policy.BatchSize < 1 {
 		return RetentionResult{}, fmt.Errorf("retention batch size must be positive")
 	}
@@ -20,7 +22,7 @@ func (r *PostgresMonitorRepository) DeleteExpiredData(ctx context.Context, _ tim
 	if err != nil {
 		return RetentionResult{}, err
 	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	defer rollbackTransaction(ctx, tx)
 	now, err := databaseTime(ctx, tx)
 	if err != nil {
 		return RetentionResult{}, err

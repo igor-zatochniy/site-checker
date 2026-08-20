@@ -321,6 +321,8 @@ Expected demonstration:
 | `APP_ROLE` | `all` | Runtime role: `all`, `api`, `scheduler`, `worker`, or `alert-dispatcher`. |
 | `STORAGE_TYPE` | `memory` or `postgres` when `DATABASE_URL` is set | Storage backend. Production and split `api`/`scheduler`/`worker` roles require PostgreSQL. |
 | `DATABASE_URL` | empty | PostgreSQL connection string. Required for `STORAGE_TYPE=postgres`. |
+| `DATABASE_OPERATION_TIMEOUT` | `15s` | Upper bound for each PostgreSQL runtime operation, including scheduler, worker, API, and alert state transitions. |
+| `DATABASE_MIGRATION_TIMEOUT` | `2m` | Upper bound for PostgreSQL pool initialization and startup migrations. |
 | `RUN_MIGRATIONS` | `true` | Runs embedded SQL migrations on startup. |
 | `API_KEY` | empty | API key with at least 24 characters. Required for `api` and `all` roles unless local authentication is explicitly disabled. |
 | `AUTH_DISABLED` | `false` | Explicitly disables API authentication. Allowed only with `APP_ENV=local`, `development`, or `demo`; rejected in production. |

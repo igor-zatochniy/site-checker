@@ -15,25 +15,44 @@ import (
 )
 
 type PostgresMonitorRepository struct {
-	pool   *pgxpool.Pool
-	policy *NetworkPolicy
+	pool             *pgxpool.Pool
+	policy           *NetworkPolicy
+	operationTimeout time.Duration
 }
 
 func NewPostgresMonitorRepository(pool *pgxpool.Pool, policy *NetworkPolicy) *PostgresMonitorRepository {
-	return &PostgresMonitorRepository{pool: pool, policy: policy}
+	return NewPostgresMonitorRepositoryWithTimeout(pool, policy, defaultDatabaseOperationTimeout)
+}
+
+func NewPostgresMonitorRepositoryWithTimeout(pool *pgxpool.Pool, policy *NetworkPolicy, operationTimeout time.Duration) *PostgresMonitorRepository {
+	return &PostgresMonitorRepository{
+		pool:             pool,
+		policy:           policy,
+		operationTimeout: operationTimeout,
+	}
+}
+
+func (r *PostgresMonitorRepository) operationContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return databaseTimeoutContext(parent, r.operationTimeout, defaultDatabaseOperationTimeout)
 }
 
 func (r *PostgresMonitorRepository) Ping(ctx context.Context) error {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	return r.pool.Ping(ctx)
 }
 
 func (r *PostgresMonitorRepository) Count(ctx context.Context) (int, error) {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	var total int
 	err := r.pool.QueryRow(ctx, "SELECT count(*) FROM monitors").Scan(&total)
 	return total, err
 }
 
 func (r *PostgresMonitorRepository) Create(ctx context.Context, input MonitorInput) (Monitor, error) {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	if err := validateMonitorInput(input, r.policy); err != nil {
 		return Monitor{}, err
 	}
@@ -81,6 +100,8 @@ func (r *PostgresMonitorRepository) Create(ctx context.Context, input MonitorInp
 }
 
 func (r *PostgresMonitorRepository) List(ctx context.Context, offset, limit int) ([]Monitor, int, error) {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	total, err := r.Count(ctx)
 	if err != nil {
 		return nil, 0, err
@@ -104,6 +125,8 @@ func (r *PostgresMonitorRepository) List(ctx context.Context, offset, limit int)
 }
 
 func (r *PostgresMonitorRepository) Get(ctx context.Context, id string) (Monitor, error) {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	monitor, err := scanMonitor(r.pool.QueryRow(ctx, `
 		SELECT id, url, interval_seconds, timeout_seconds, expected_status,
 			status, enabled, next_check_at, created_at, updated_at,
@@ -118,11 +141,13 @@ func (r *PostgresMonitorRepository) Get(ctx context.Context, id string) (Monitor
 }
 
 func (r *PostgresMonitorRepository) Update(ctx context.Context, id string, patch MonitorPatch) (Monitor, error) {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return Monitor{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer rollbackTransaction(ctx, tx)
 
 	current, err := scanMonitor(tx.QueryRow(ctx, `
 		SELECT id, url, interval_seconds, timeout_seconds, expected_status,
@@ -259,6 +284,8 @@ func (r *PostgresMonitorRepository) Update(ctx context.Context, id string, patch
 }
 
 func (r *PostgresMonitorRepository) Delete(ctx context.Context, id string) error {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	tag, err := r.pool.Exec(ctx, "DELETE FROM monitors WHERE id = $1", id)
 	if err != nil {
 		return err
@@ -270,11 +297,13 @@ func (r *PostgresMonitorRepository) Delete(ctx context.Context, id string) error
 }
 
 func (r *PostgresMonitorRepository) CreateManualJob(ctx context.Context, id string) (CheckJobRecord, bool, error) {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return CheckJobRecord{}, false, err
 	}
-	defer tx.Rollback(ctx)
+	defer rollbackTransaction(ctx, tx)
 	now, err := databaseTime(ctx, tx)
 	if err != nil {
 		return CheckJobRecord{}, false, err
@@ -335,6 +364,8 @@ func (r *PostgresMonitorRepository) CreateManualJob(ctx context.Context, id stri
 }
 
 func (r *PostgresMonitorRepository) ClaimDueJobs(ctx context.Context, limit int, leaseTimeout time.Duration, maxAttempts int) ([]CheckJobRecord, error) {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	if limit <= 0 {
 		return nil, nil
 	}
@@ -348,7 +379,7 @@ func (r *PostgresMonitorRepository) ClaimDueJobs(ctx context.Context, limit int,
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(ctx)
+	defer rollbackTransaction(ctx, tx)
 	now, err := databaseTime(ctx, tx)
 	if err != nil {
 		return nil, err
@@ -499,6 +530,8 @@ func (r *PostgresMonitorRepository) ClaimDueJobs(ctx context.Context, limit int,
 }
 
 func (r *PostgresMonitorRepository) GetCheckJob(ctx context.Context, jobID string) (CheckJobRecord, error) {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	job, err := scanCheckJob(r.pool.QueryRow(ctx, `
 		SELECT id, monitor_id, kind, scheduled_for, status, attempt,
 			available_at, published_at, processing_started_at,
@@ -513,6 +546,8 @@ func (r *PostgresMonitorRepository) GetCheckJob(ctx context.Context, jobID strin
 }
 
 func (r *PostgresMonitorRepository) MarkJobPublished(ctx context.Context, id, jobID string) error {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE check_jobs
 		SET status = 'queued',
@@ -533,6 +568,8 @@ func (r *PostgresMonitorRepository) MarkJobPublished(ctx context.Context, id, jo
 }
 
 func (r *PostgresMonitorRepository) ReleaseJobPublish(ctx context.Context, id, jobID, lastError string) error {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE check_jobs
 		SET lease_expires_at = NULL,
@@ -552,6 +589,8 @@ func (r *PostgresMonitorRepository) ReleaseJobPublish(ctx context.Context, id, j
 }
 
 func (r *PostgresMonitorRepository) RecoverQueuedJobsAfterTopologyLoss(ctx context.Context) (int64, error) {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	tag, err := r.pool.Exec(ctx, `
 		WITH db_clock AS MATERIALIZED (
 			SELECT clock_timestamp() AS now
@@ -575,6 +614,8 @@ func (r *PostgresMonitorRepository) RecoverQueuedJobsAfterTopologyLoss(ctx conte
 }
 
 func (r *PostgresMonitorRepository) MarkJobProcessing(ctx context.Context, id, jobID string, attempt int, leaseTimeout time.Duration) (ProcessingLease, error) {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	if leaseTimeout <= 0 {
 		leaseTimeout = time.Minute
 	}
@@ -624,6 +665,8 @@ func (r *PostgresMonitorRepository) MarkJobProcessing(ctx context.Context, id, j
 }
 
 func (r *PostgresMonitorRepository) MarkJobFailed(ctx context.Context, lease ProcessingLease, lastError string, retryDelay time.Duration) error {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	retryDelay = max(retryDelay, 0)
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE check_jobs
@@ -650,11 +693,13 @@ func (r *PostgresMonitorRepository) MarkJobFailed(ctx context.Context, lease Pro
 }
 
 func (r *PostgresMonitorRepository) MarkJobDead(ctx context.Context, lease ProcessingLease, lastError string) error {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer rollbackTransaction(ctx, tx)
 	now, err := databaseTime(ctx, tx)
 	if err != nil {
 		return err
@@ -715,6 +760,8 @@ func (r *PostgresMonitorRepository) MarkJobDead(ctx context.Context, lease Proce
 }
 
 func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRecord, lease ProcessingLease, alertPolicy AlertPolicy) (Monitor, error) {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	if record.JobID == "" {
 		return Monitor{}, ErrJobIDRequired
 	}
@@ -723,7 +770,7 @@ func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRe
 	if err != nil {
 		return Monitor{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer rollbackTransaction(ctx, tx)
 
 	var monitorID string
 	err = tx.QueryRow(ctx, `
@@ -843,6 +890,8 @@ func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRe
 }
 
 func (r *PostgresMonitorRepository) ListChecks(ctx context.Context, id string, offset, limit int) ([]CheckRecord, int, error) {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	if _, err := r.Get(ctx, id); err != nil {
 		return nil, 0, err
 	}
@@ -869,6 +918,8 @@ func (r *PostgresMonitorRepository) ListChecks(ctx context.Context, id string, o
 }
 
 func (r *PostgresMonitorRepository) Stats(ctx context.Context, id string) (MonitorStats, error) {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	monitor, err := r.Get(ctx, id)
 	if err != nil {
 		return MonitorStats{}, err
@@ -907,6 +958,8 @@ func (r *PostgresMonitorRepository) Stats(ctx context.Context, id string) (Monit
 }
 
 func (r *PostgresMonitorRepository) ListIncidents(ctx context.Context, status string, offset, limit int) ([]Incident, int, error) {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	var (
 		rows  pgx.Rows
 		err   error
@@ -946,6 +999,8 @@ func (r *PostgresMonitorRepository) ListIncidents(ctx context.Context, status st
 }
 
 func (r *PostgresMonitorRepository) ClaimAlerts(ctx context.Context, limit int, leaseTimeout time.Duration, maxAttempts int) ([]AlertOutboxEvent, error) {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	if limit <= 0 {
 		return nil, nil
 	}
@@ -960,7 +1015,7 @@ func (r *PostgresMonitorRepository) ClaimAlerts(ctx context.Context, limit int, 
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(ctx)
+	defer rollbackTransaction(ctx, tx)
 	now, err := databaseTime(ctx, tx)
 	if err != nil {
 		return nil, err
@@ -1049,6 +1104,8 @@ func (r *PostgresMonitorRepository) ClaimAlerts(ctx context.Context, limit int, 
 }
 
 func (r *PostgresMonitorRepository) MarkAlertDelivered(ctx context.Context, id, leaseToken string) error {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE alert_outbox
 		SET status = 'delivered',
@@ -1071,6 +1128,8 @@ func (r *PostgresMonitorRepository) MarkAlertDelivered(ctx context.Context, id, 
 }
 
 func (r *PostgresMonitorRepository) MarkAlertFailed(ctx context.Context, id, leaseToken, lastError string, retryDelay time.Duration, dead bool) error {
+	ctx, cancel := r.operationContext(ctx)
+	defer cancel()
 	status := "pending"
 	if dead {
 		status = "dead"

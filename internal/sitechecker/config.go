@@ -19,6 +19,8 @@ const (
 	defaultCheckInterval             = 5 * time.Minute
 	defaultHTTPTimeout               = 5 * time.Second
 	defaultCheckLeaseTimeout         = 2 * time.Minute
+	defaultDatabaseOperationTimeout  = 15 * time.Second
+	defaultDatabaseMigrationTimeout  = 2 * time.Minute
 	defaultHealthAddr                = ":8080"
 	defaultMaxRedirects              = 3
 	defaultMaxBodyBytes              = 64 * 1024
@@ -59,6 +61,8 @@ type Config struct {
 	AppRole                   string
 	StorageType               string
 	DatabaseURL               string
+	DatabaseOperationTimeout  time.Duration
+	DatabaseMigrationTimeout  time.Duration
 	RunMigrations             bool
 	APIKey                    string
 	AuthDisabled              bool
@@ -117,6 +121,8 @@ func LoadConfig() (Config, error) {
 	cfg.AppEnv = envEnum("APP_ENV", "production", []string{"production", "local", "development", "demo"}, &errs)
 	cfg.AppRole = envEnum("APP_ROLE", defaultAppRole, []string{"all", "api", "scheduler", "worker", "alert-dispatcher"}, &errs)
 	cfg.DatabaseURL = envString("DATABASE_URL", "")
+	cfg.DatabaseOperationTimeout = envDuration("DATABASE_OPERATION_TIMEOUT", defaultDatabaseOperationTimeout, time.Second, 5*time.Minute, &errs)
+	cfg.DatabaseMigrationTimeout = envDuration("DATABASE_MIGRATION_TIMEOUT", defaultDatabaseMigrationTimeout, time.Second, 30*time.Minute, &errs)
 	cfg.StorageType = envString("STORAGE_TYPE", "")
 	if cfg.StorageType == "" {
 		cfg.StorageType = defaultStorageType

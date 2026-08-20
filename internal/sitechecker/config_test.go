@@ -12,6 +12,8 @@ var configEnvKeys = []string{
 	"APP_ROLE",
 	"STORAGE_TYPE",
 	"DATABASE_URL",
+	"DATABASE_OPERATION_TIMEOUT",
+	"DATABASE_MIGRATION_TIMEOUT",
 	"RUN_MIGRATIONS",
 	"API_KEY",
 	"AUTH_DISABLED",
@@ -122,6 +124,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if cfg.CheckLeaseTimeout != 2*time.Minute {
 		t.Fatalf("CheckLeaseTimeout = %s, want 2m", cfg.CheckLeaseTimeout)
+	}
+	if cfg.DatabaseOperationTimeout != 15*time.Second || cfg.DatabaseMigrationTimeout != 2*time.Minute {
+		t.Fatalf("database timeouts = operation:%s migration:%s, want 15s and 2m", cfg.DatabaseOperationTimeout, cfg.DatabaseMigrationTimeout)
 	}
 	if cfg.AlertMaxAttempts != 8 {
 		t.Fatalf("AlertMaxAttempts = %d, want 8", cfg.AlertMaxAttempts)

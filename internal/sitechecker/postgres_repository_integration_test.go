@@ -1249,3 +1249,92 @@ func findClaimedJobID(jobs []CheckJobRecord, monitorID string) string {
 	}
 	return ""
 }
+
+func TestPostgresOperationAndMigrationTimeouts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	postgresContainer, err := postgres.Run(ctx,
+		"postgres:16-alpine",
+		postgres.WithDatabase("site_checker"),
+		postgres.WithUsername("site_checker"),
+		postgres.WithPassword("site_checker"),
+		postgres.BasicWaitStrategies(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := testcontainers.TerminateContainer(postgresContainer); err != nil {
+			t.Logf("failed to terminate postgres container: %v", err)
+		}
+	}()
+
+	databaseURL := postgresContainer.MustConnectionString(ctx, "sslmode=disable")
+	pool, err := OpenPostgresPool(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := RunMigrations(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testCheckerConfig(t)
+	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}
+	repo := NewPostgresMonitorRepositoryWithTimeout(pool, NewNetworkPolicy(cfg), 100*time.Millisecond)
+	monitor, err := repo.Create(ctx, MonitorInput{
+		URL:             "https://example.com",
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lockTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockTx.Exec(ctx, "SELECT id FROM monitors WHERE id = $1 FOR UPDATE", monitor.ID); err != nil {
+		_ = lockTx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err = repo.Update(context.Background(), monitor.ID, MonitorPatch{})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		_ = lockTx.Rollback(ctx)
+		t.Fatalf("locked update error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		_ = lockTx.Rollback(ctx)
+		t.Fatalf("locked update returned after %s, want bounded operation timeout", elapsed)
+	}
+	if err := lockTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Update(ctx, monitor.ID, MonitorPatch{}); err != nil {
+		t.Fatalf("update after lock release failed: %v", err)
+	}
+
+	migrationLockTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := migrationLockTx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext('site_checker_migrations'))"); err != nil {
+		_ = migrationLockTx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	err = RunMigrationsWithTimeout(context.Background(), pool, 100*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		_ = migrationLockTx.Rollback(ctx)
+		t.Fatalf("migration lock error = %v, want context deadline exceeded", err)
+	}
+	if err := migrationLockTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunMigrationsWithTimeout(ctx, pool, time.Second); err != nil {
+		t.Fatalf("migration after lock release failed: %v", err)
+	}
+}

@@ -3,6 +3,7 @@ package sitechecker
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -18,8 +20,19 @@ import (
 var migrationFiles embed.FS
 
 func OpenPostgresPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
+	return OpenPostgresPoolWithTimeout(ctx, databaseURL, defaultDatabaseOperationTimeout)
+}
+
+func OpenPostgresPoolWithTimeout(ctx context.Context, databaseURL string, timeout time.Duration) (*pgxpool.Pool, error) {
+	ctx, cancel := databaseTimeoutContext(ctx, timeout, defaultDatabaseOperationTimeout)
+	defer cancel()
+
 	poolConfig, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
+		var parseErr *pgconn.ParseConfigError
+		if errors.As(err, &parseErr) {
+			return nil, errors.New("invalid PostgreSQL connection string")
+		}
 		return nil, err
 	}
 	poolConfig.MaxConns = 10
@@ -39,6 +52,13 @@ func OpenPostgresPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, e
 }
 
 func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
+	return RunMigrationsWithTimeout(ctx, pool, defaultDatabaseMigrationTimeout)
+}
+
+func RunMigrationsWithTimeout(ctx context.Context, pool *pgxpool.Pool, timeout time.Duration) error {
+	ctx, cancel := databaseTimeoutContext(ctx, timeout, defaultDatabaseMigrationTimeout)
+	defer cancel()
+
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -46,7 +66,7 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 	committed := false
 	defer func() {
 		if !committed {
-			_ = tx.Rollback(context.WithoutCancel(ctx))
+			rollbackTransaction(ctx, tx)
 		}
 	}()
 
@@ -91,6 +111,19 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	committed = true
 	return nil
+}
+
+func databaseTimeoutContext(parent context.Context, timeout, fallback time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		timeout = fallback
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
+func rollbackTransaction(parent context.Context, tx pgx.Tx) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), defaultDatabaseOperationTimeout)
+	defer cancel()
+	_ = tx.Rollback(ctx)
 }
 
 func migrationApplied(ctx context.Context, tx pgx.Tx, version string) (bool, error) {

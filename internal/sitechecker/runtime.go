@@ -28,18 +28,18 @@ type infrastructureRequeueBackoff struct {
 
 func NewConfiguredRepository(ctx context.Context, cfg Config, policy *NetworkPolicy, logger *slog.Logger) (MonitorRepository, func(), error) {
 	if cfg.StorageType == "postgres" {
-		pool, err := OpenPostgresPool(ctx, cfg.DatabaseURL)
+		pool, err := OpenPostgresPoolWithTimeout(ctx, cfg.DatabaseURL, cfg.DatabaseMigrationTimeout)
 		if err != nil {
 			return nil, nil, err
 		}
 		if cfg.RunMigrations {
-			if err := RunMigrations(ctx, pool); err != nil {
+			if err := RunMigrationsWithTimeout(ctx, pool, cfg.DatabaseMigrationTimeout); err != nil {
 				pool.Close()
 				return nil, nil, err
 			}
 			logger.Info("Database migrations applied")
 		}
-		return NewPostgresMonitorRepository(pool, policy), pool.Close, nil
+		return NewPostgresMonitorRepositoryWithTimeout(pool, policy, cfg.DatabaseOperationTimeout), pool.Close, nil
 	}
 
 	return NewInMemoryMonitorRepository(policy), func() {}, nil
