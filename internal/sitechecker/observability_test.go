@@ -48,6 +48,9 @@ func TestHTTPWriteTimeoutExceedsAPIRequestBudget(t *testing.T) {
 	if margin := server.WriteTimeout - cfg.DatabaseOperationTimeout; margin < httpResponseWriteMargin {
 		t.Fatalf("write margin = %s, want at least %s", margin, httpResponseWriteMargin)
 	}
+	if databaseRollbackTimeout >= httpResponseWriteMargin {
+		t.Fatalf("rollback timeout = %s, must remain below HTTP write margin %s", databaseRollbackTimeout, httpResponseWriteMargin)
+	}
 }
 
 func TestReadinessForSplitRoleDoesNotRequireCompletedChecks(t *testing.T) {

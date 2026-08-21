@@ -263,6 +263,11 @@ func LoadConfig() (Config, error) {
 	if cfg.AppEnv == "production" && roleEnabled(cfg.AppRole, "scheduler") && cfg.QueueType != "rabbitmq" {
 		errs = append(errs, errors.New("QUEUE_TYPE=rabbitmq is required for scheduler-enabled production roles"))
 	}
+	if cfg.AppEnv == "production" && cfg.QueueType == "rabbitmq" &&
+		(roleEnabled(cfg.AppRole, "scheduler") || roleEnabled(cfg.AppRole, "worker")) &&
+		rabbitMQHeartbeatDisabled(cfg.RabbitMQURL) {
+		errs = append(errs, errors.New("RABBITMQ_URL heartbeat must be greater than zero in production"))
+	}
 	if cfg.AppEnv == "production" && cfg.AppRole == "all" && !cfg.RetentionEnabled {
 		errs = append(errs, errors.New("RETENTION_ENABLED=true is required for APP_ROLE=all in production"))
 	}
@@ -295,6 +300,19 @@ func LoadConfig() (Config, error) {
 		return Config{}, errors.Join(errs...)
 	}
 	return cfg, nil
+}
+
+func rabbitMQHeartbeatDisabled(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	rawHeartbeat := parsed.Query().Get("heartbeat")
+	if rawHeartbeat == "" {
+		return false
+	}
+	heartbeat, err := strconv.Atoi(rawHeartbeat)
+	return err == nil && heartbeat <= 0
 }
 
 func envString(key, defaultValue string) string {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -72,6 +73,13 @@ func TestRabbitMQQueueRetriesAndDeadLetters(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer secondQueue.Close()
+	mismatchedConfig := queueConfig
+	mismatchedConfig.DeadLetterQueueName += ".changed"
+	mismatchedQueue, mismatchErr := NewRabbitMQQueue(mismatchedConfig)
+	if mismatchErr == nil {
+		_ = mismatchedQueue.Close()
+		t.Fatal("RabbitMQ queue accepted incompatible dead-letter arguments")
+	}
 
 	if err := deleteRabbitQueue(queue.url, queue.queueName); err != nil {
 		t.Fatal(err)
@@ -290,6 +298,227 @@ func TestRabbitMQQueueRetriesAndDeadLetters(t *testing.T) {
 	queue.mu.RUnlock()
 	if connectionAfterDelete != connectionBeforeDelete || connectionAfterDelete.IsClosed() {
 		t.Fatal("topology recovery unnecessarily replaced the live RabbitMQ connection")
+	}
+
+	testRabbitMQHalfOpenTeardown(t, ctx, endpoint)
+}
+
+func testRabbitMQHalfOpenTeardown(t *testing.T, ctx context.Context, endpoint string) {
+	t.Helper()
+	proxy := newHalfOpenRabbitMQProxy(t, endpoint)
+	defer proxy.Close()
+
+	publishTimeout := 250 * time.Millisecond
+	config := Config{
+		RabbitMQURL:              fmt.Sprintf("amqp://site_checker:site_checker@%s/", proxy.Addr()),
+		QueueName:                "site_checker.integration.half_open.publish",
+		DeadLetterQueueName:      "site_checker.integration.half_open.publish.dead",
+		QueuePrefetch:            1,
+		MaxJobAttempts:           2,
+		RabbitMQConnectTimeout:   2 * time.Second,
+		RabbitMQPublishTimeout:   publishTimeout,
+		RabbitMQReconnectInitial: 50 * time.Millisecond,
+		RabbitMQReconnectMax:     100 * time.Millisecond,
+	}
+	publishQueue, err := NewRabbitMQQueue(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer publishQueue.Close()
+
+	shutdownConfig := config
+	shutdownConfig.QueueName = "site_checker.integration.half_open.shutdown"
+	shutdownConfig.DeadLetterQueueName = "site_checker.integration.half_open.shutdown.dead"
+	shutdownQueue, err := NewRabbitMQQueue(shutdownConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer shutdownQueue.Close()
+	closeConfig := config
+	closeConfig.QueueName = "site_checker.integration.half_open.close"
+	closeConfig.DeadLetterQueueName = "site_checker.integration.half_open.close.dead"
+	closeQueue, err := NewRabbitMQQueue(closeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeQueue.Close()
+
+	consumeCtx, cancelConsume := context.WithCancel(ctx)
+	deliveries, _, err := shutdownQueue.Consume(consumeCtx)
+	if err != nil {
+		cancelConsume()
+		t.Fatal(err)
+	}
+	warmup := CheckJobMessage{JobID: "job_half_open_warmup", MonitorID: "mon_half_open", Attempt: 1, EnqueuedAt: time.Now().UTC()}
+	if err := shutdownQueue.Publish(ctx, warmup); err != nil {
+		cancelConsume()
+		t.Fatal(err)
+	}
+	if err := receiveRabbitDelivery(t, deliveries).Ack(ctx); err != nil {
+		cancelConsume()
+		t.Fatal(err)
+	}
+
+	proxy.DropBrokerResponses()
+	startedAt := time.Now()
+	publishErr := publishQueue.Publish(ctx, CheckJobMessage{
+		JobID:      "job_half_open_publish",
+		MonitorID:  "mon_half_open",
+		Attempt:    1,
+		EnqueuedAt: time.Now().UTC(),
+	})
+	if publishErr == nil {
+		t.Fatal("publish through half-open proxy returned nil error")
+	}
+	if elapsed := time.Since(startedAt); elapsed > 2*time.Second {
+		t.Fatalf("half-open publish returned after %s, want bounded by publish timeout %s", elapsed, publishTimeout)
+	}
+	startedAt = time.Now()
+	_ = closeQueue.Close()
+	if elapsed := time.Since(startedAt); elapsed > 2*time.Second {
+		t.Fatalf("half-open connection close returned after %s, want bounded by publish timeout %s", elapsed, publishTimeout)
+	}
+
+	cancelConsume()
+	startedAt = time.Now()
+	_ = shutdownQueue.Close()
+	if elapsed := time.Since(startedAt); elapsed > 2*time.Second {
+		t.Fatalf("half-open queue close returned after %s, want bounded by publish timeout %s", elapsed, publishTimeout)
+	}
+	select {
+	case _, open := <-deliveries:
+		if open {
+			t.Fatal("RabbitMQ consumer produced a delivery while shutting down")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RabbitMQ consumer did not stop after bounded queue close")
+	}
+}
+
+type halfOpenRabbitMQProxy struct {
+	listener    net.Listener
+	target      string
+	drop        atomic.Bool
+	acceptDone  chan struct{}
+	mu          sync.Mutex
+	connections map[net.Conn]struct{}
+	workers     sync.WaitGroup
+}
+
+func newHalfOpenRabbitMQProxy(t *testing.T, target string) *halfOpenRabbitMQProxy {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := &halfOpenRabbitMQProxy{
+		listener:    listener,
+		target:      target,
+		acceptDone:  make(chan struct{}),
+		connections: make(map[net.Conn]struct{}),
+	}
+	go proxy.accept()
+	return proxy
+}
+
+func (p *halfOpenRabbitMQProxy) Addr() string {
+	return p.listener.Addr().String()
+}
+
+func (p *halfOpenRabbitMQProxy) DropBrokerResponses() {
+	p.drop.Store(true)
+}
+
+func (p *halfOpenRabbitMQProxy) Close() {
+	_ = p.listener.Close()
+	<-p.acceptDone
+	p.mu.Lock()
+	connections := make([]net.Conn, 0, len(p.connections))
+	for connection := range p.connections {
+		connections = append(connections, connection)
+	}
+	p.mu.Unlock()
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
+	p.workers.Wait()
+}
+
+func (p *halfOpenRabbitMQProxy) accept() {
+	defer close(p.acceptDone)
+	for {
+		client, err := p.listener.Accept()
+		if err != nil {
+			return
+		}
+		upstream, err := net.DialTimeout("tcp", p.target, 2*time.Second)
+		if err != nil {
+			_ = client.Close()
+			continue
+		}
+		p.track(client, upstream)
+		p.workers.Add(1)
+		go p.forward(client, upstream)
+	}
+}
+
+func (p *halfOpenRabbitMQProxy) forward(client, upstream net.Conn) {
+	defer p.workers.Done()
+	var closeOnce sync.Once
+	closeConnections := func() {
+		closeOnce.Do(func() {
+			_ = client.Close()
+			_ = upstream.Close()
+		})
+	}
+	clientDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(upstream, client)
+		closeConnections()
+		close(clientDone)
+	}()
+
+	buffer := make([]byte, 32*1024)
+	for {
+		read, err := upstream.Read(buffer)
+		if read > 0 && !p.drop.Load() {
+			if writeErr := writeAll(client, buffer[:read]); writeErr != nil {
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	closeConnections()
+	<-clientDone
+	p.untrack(client, upstream)
+}
+
+func writeAll(connection net.Conn, payload []byte) error {
+	for len(payload) > 0 {
+		written, err := connection.Write(payload)
+		if err != nil {
+			return err
+		}
+		payload = payload[written:]
+	}
+	return nil
+}
+
+func (p *halfOpenRabbitMQProxy) track(connections ...net.Conn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, connection := range connections {
+		p.connections[connection] = struct{}{}
+	}
+}
+
+func (p *halfOpenRabbitMQProxy) untrack(connections ...net.Conn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, connection := range connections {
+		delete(p.connections, connection)
 	}
 }
 

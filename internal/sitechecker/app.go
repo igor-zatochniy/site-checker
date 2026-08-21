@@ -191,6 +191,11 @@ func runApplication(parentCtx context.Context, version, commit, buildDate string
 	case runtimeErr = <-fatalErrors:
 	}
 	cancel()
+	if queue != nil {
+		if err := queue.Close(); err != nil {
+			logger.Warn("Job queue did not close cleanly", "error", err)
+		}
+	}
 	wg.Wait()
 	if runtimeErr != nil {
 		return runtimeErr

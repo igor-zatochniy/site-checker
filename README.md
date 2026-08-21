@@ -129,6 +129,7 @@ STORAGE_TYPE=postgres \
 DATABASE_URL='postgres://site_checker:site_checker@localhost:5432/site_checker?sslmode=disable' \
 QUEUE_TYPE=rabbitmq \
 RABBITMQ_URL='amqp://site_checker:site_checker@localhost:5672/' \
+RETENTION_ENABLED=true \
 API_KEY='replace-with-a-random-api-key' \
 go run .
 ```
@@ -327,13 +328,13 @@ Expected demonstration:
 | `API_KEY` | empty | API key with at least 24 characters. Required for `api` and `all` roles unless local authentication is explicitly disabled. |
 | `AUTH_DISABLED` | `false` | Explicitly disables API authentication. Allowed only with `APP_ENV=local`, `development`, or `demo`; rejected in production. |
 | `QUEUE_TYPE` | `memory` or `rabbitmq` when `RABBITMQ_URL` is set | Job queue backend. Split `scheduler` and `worker` roles require RabbitMQ. |
-| `RABBITMQ_URL` | empty | RabbitMQ AMQP URL. Required for `QUEUE_TYPE=rabbitmq`. |
+| `RABBITMQ_URL` | empty | RabbitMQ AMQP URL. Required for `QUEUE_TYPE=rabbitmq`; production rejects an explicitly disabled (`heartbeat=0`) heartbeat. |
 | `RABBITMQ_CONNECT_TIMEOUT` | `5s` | Timeout for one RabbitMQ TCP and protocol connection attempt. |
-| `RABBITMQ_PUBLISH_TIMEOUT` | `10s` | End-to-end limit for publishing and receiving a broker confirmation; socket writes use the same upper bound. |
+| `RABBITMQ_PUBLISH_TIMEOUT` | `10s` | End-to-end limit for publishing, receiving a broker confirmation, and closing an unhealthy RabbitMQ connection; socket writes use the same upper bound. |
 | `RABBITMQ_RECONNECT_INITIAL_BACKOFF` | `1s` | Initial delay before retrying a failed RabbitMQ connection or consumer session. |
 | `RABBITMQ_RECONNECT_MAX_BACKOFF` | `30s` | Maximum RabbitMQ reconnect delay. |
 | `QUEUE_NAME` | `site_checker.checks` | Main check job queue. |
-| `DEAD_LETTER_QUEUE_NAME` | `site_checker.checks.dead` | RabbitMQ dead-letter queue. |
+| `DEAD_LETTER_QUEUE_NAME` | `site_checker.checks.dead` | RabbitMQ dead-letter queue. Changing it requires recreating the main queue (or a broker policy); startup fails if an existing queue has incompatible dead-letter arguments. |
 | `QUEUE_BUFFER_SIZE` | `1000` | In-memory queue buffer size. |
 | `QUEUE_PREFETCH` | `10` | RabbitMQ consumer prefetch. |
 | `MAX_JOB_ATTEMPTS` | `3` | Strict maximum processing attempts. PostgreSQL lease recovery terminalizes an expired final attempt without publishing another delivery. |

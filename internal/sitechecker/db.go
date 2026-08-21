@@ -16,6 +16,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const databaseRollbackTimeout = 2 * time.Second
+
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
@@ -121,7 +123,7 @@ func databaseTimeoutContext(parent context.Context, timeout, fallback time.Durat
 }
 
 func rollbackTransaction(parent context.Context, tx pgx.Tx) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), defaultDatabaseOperationTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), databaseRollbackTimeout)
 	defer cancel()
 	_ = tx.Rollback(ctx)
 }

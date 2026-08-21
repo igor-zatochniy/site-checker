@@ -386,7 +386,7 @@ func (q *RabbitMQQueue) Ping(ctx context.Context) error {
 	}
 	channel, err := conn.Channel()
 	if err != nil {
-		q.invalidateConnection(conn)
+		q.invalidateConnection(ctx, conn)
 		return err
 	}
 	defer channel.Close()
@@ -466,7 +466,7 @@ func (q *RabbitMQQueue) repairTopology(ctx context.Context) error {
 	}
 	if err := q.repairTopologyOnConnection(ctx, conn); err != nil {
 		if conn.IsClosed() {
-			q.invalidateConnection(conn)
+			q.invalidateConnection(ctx, conn)
 		}
 		return err
 	}
@@ -486,7 +486,7 @@ func (q *RabbitMQQueue) repairTopologyOnConnection(ctx context.Context, conn *am
 		_ = channel.Close()
 	} else {
 		defer channel.Close()
-		return q.declareDeadLetterTopology(channel)
+		return q.declareTopology(channel)
 	}
 
 	releaseLock, err := q.acquireTopologyRecoveryLock(ctx)
@@ -501,7 +501,7 @@ func (q *RabbitMQQueue) repairTopologyOnConnection(ctx context.Context, conn *am
 	}
 	if _, err := channel.QueueDeclarePassive(q.queueName, true, false, false, false, nil); err == nil {
 		defer channel.Close()
-		return q.declareDeadLetterTopology(channel)
+		return q.declareTopology(channel)
 	} else if !isRabbitMQNotFound(err) {
 		_ = channel.Close()
 		return err
@@ -541,18 +541,16 @@ func (q *RabbitMQQueue) acquireTopologyRecoveryLock(ctx context.Context) (func()
 		}
 		channel, err := connection.Channel()
 		if err != nil {
-			_ = connection.Close()
+			_ = q.closeConnection(ctx, connection)
 			return nil, err
 		}
 		_, err = channel.QueueDeclare(lockName, false, true, true, false, nil)
 		if err == nil {
 			return func() {
-				_ = channel.Close()
-				_ = connection.Close()
+				_ = q.closeConnection(ctx, connection)
 			}, nil
 		}
-		_ = channel.Close()
-		_ = connection.Close()
+		_ = q.closeConnection(ctx, connection)
 		var rabbitErr *amqp.Error
 		if !errors.As(err, &rabbitErr) || rabbitErr.Code != 405 {
 			return nil, err
@@ -626,7 +624,7 @@ func (q *RabbitMQQueue) Publish(ctx context.Context, job CheckJobMessage) error 
 				err = errors.Join(err, fmt.Errorf("repair rabbitmq topology: %w", repairErr))
 			}
 		}
-		q.invalidatePublishChannel(session.channel)
+		q.invalidatePublishChannel(publishCtx, session.channel)
 		if publishCtx.Err() != nil {
 			return publishCtx.Err()
 		}
@@ -734,11 +732,17 @@ func (q *RabbitMQQueue) consumeSession(ctx context.Context, deliveries chan<- Qu
 	channel, err := q.openTopologyChannel(ctx, conn)
 	if err != nil {
 		if conn.IsClosed() {
-			q.invalidateConnection(conn)
+			q.invalidateConnection(ctx, conn)
 		}
 		return err
 	}
-	defer channel.Close()
+	defer func() {
+		if ctx.Err() != nil || q.isClosed() {
+			q.invalidateConnection(ctx, conn)
+			return
+		}
+		_ = channel.Close()
+	}()
 	if err := channel.Qos(q.prefetch, 0, false); err != nil {
 		return err
 	}
@@ -869,23 +873,21 @@ func (q *RabbitMQQueue) connectOnce(ctx context.Context) error {
 	}
 	channel, err := q.openTopologyChannel(ctx, conn)
 	if err != nil {
-		_ = conn.Close()
+		_ = q.closeConnection(ctx, conn)
 		return err
 	}
 	confirms := channel.NotifyPublish(make(chan amqp.Confirmation, 1))
 	returns := channel.NotifyReturn(make(chan amqp.Return, 1))
 	publishClosed := channel.NotifyClose(make(chan *amqp.Error, 1))
 	if err := channel.Confirm(false); err != nil {
-		_ = channel.Close()
-		_ = conn.Close()
+		_ = q.closeConnection(ctx, conn)
 		return err
 	}
 
 	q.mu.Lock()
 	if q.closed {
 		q.mu.Unlock()
-		_ = channel.Close()
-		_ = conn.Close()
+		_ = q.closeConnection(ctx, conn)
 		return context.Canceled
 	}
 	oldConn := q.conn
@@ -896,7 +898,7 @@ func (q *RabbitMQQueue) connectOnce(ctx context.Context) error {
 	q.publishClosed = publishClosed
 	q.mu.Unlock()
 	if oldConn != nil && oldConn != conn {
-		_ = oldConn.Close()
+		_ = q.closeConnection(ctx, oldConn)
 	}
 	return nil
 }
@@ -965,7 +967,7 @@ func (q *RabbitMQQueue) publishSession() rabbitMQPublishSession {
 	}
 }
 
-func (q *RabbitMQQueue) invalidatePublishChannel(channel *amqp.Channel) {
+func (q *RabbitMQQueue) invalidatePublishChannel(ctx context.Context, channel *amqp.Channel) {
 	q.mu.Lock()
 	if q.channel != channel {
 		q.mu.Unlock()
@@ -979,14 +981,15 @@ func (q *RabbitMQQueue) invalidatePublishChannel(channel *amqp.Channel) {
 	q.publishClosed = nil
 	q.mu.Unlock()
 	if conn != nil {
-		_ = conn.Close()
+		_ = q.closeConnection(ctx, conn)
 	}
 }
 
-func (q *RabbitMQQueue) invalidateConnection(conn *amqp.Connection) {
+func (q *RabbitMQQueue) invalidateConnection(ctx context.Context, conn *amqp.Connection) {
 	q.mu.Lock()
 	if q.conn != conn {
 		q.mu.Unlock()
+		_ = q.closeConnection(ctx, conn)
 		return
 	}
 	q.conn = nil
@@ -995,7 +998,26 @@ func (q *RabbitMQQueue) invalidateConnection(conn *amqp.Connection) {
 	q.returns = nil
 	q.publishClosed = nil
 	q.mu.Unlock()
-	_ = conn.Close()
+	_ = q.closeConnection(ctx, conn)
+}
+
+func (q *RabbitMQQueue) closeConnection(ctx context.Context, conn *amqp.Connection) error {
+	if conn == nil || conn.IsClosed() {
+		return nil
+	}
+	deadline := time.Now().Add(q.publishTimeout)
+	if ctx != nil {
+		if ctx.Err() != nil {
+			deadline = time.Now()
+		} else if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+			deadline = contextDeadline
+		}
+	}
+	err := conn.CloseDeadline(deadline)
+	if errors.Is(err, amqp.ErrClosed) {
+		return nil
+	}
+	return err
 }
 
 func (q *RabbitMQQueue) Close() error {
@@ -1016,7 +1038,7 @@ func (q *RabbitMQQueue) Close() error {
 	if conn == nil || conn.IsClosed() {
 		return nil
 	}
-	return conn.Close()
+	return q.closeConnection(context.Background(), conn)
 }
 
 func rabbitMQReconnectDelay(attempt int, initial, maximum time.Duration) time.Duration {

@@ -363,6 +363,21 @@ func TestLoadConfigAllowsSupportedLocalAndProductionBackends(t *testing.T) {
 	})
 }
 
+func TestLoadConfigRejectsDisabledRabbitMQHeartbeatInProduction(t *testing.T) {
+	cleanConfigEnv(t)
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("APP_ROLE", "worker")
+	t.Setenv("STORAGE_TYPE", "postgres")
+	t.Setenv("DATABASE_URL", "postgres://user:pass@example.com:5432/site_checker")
+	t.Setenv("QUEUE_TYPE", "rabbitmq")
+	t.Setenv("RABBITMQ_URL", "amqp://user:pass@example.com:5672/?heartbeat=0")
+
+	_, err := LoadConfig()
+	if err == nil || !strings.Contains(err.Error(), "heartbeat") {
+		t.Fatalf("LoadConfig error = %v, want production heartbeat validation", err)
+	}
+}
+
 func TestLoadConfigRejectsPprofInProduction(t *testing.T) {
 	cleanConfigEnv(t)
 	t.Setenv("APP_ENV", "production")
