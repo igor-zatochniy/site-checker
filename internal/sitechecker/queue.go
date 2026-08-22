@@ -219,6 +219,7 @@ type rabbitMQDeadlineConn struct {
 	writeTimeout      time.Duration
 	mu                sync.RWMutex
 	handshakeDeadline time.Time
+	explicitDeadline  time.Time
 	established       bool
 }
 
@@ -351,28 +352,37 @@ func (c *rabbitMQDeadlineConn) SetDeadline(deadline time.Time) error {
 	if deadline.IsZero() {
 		c.established = true
 		c.handshakeDeadline = time.Time{}
+		c.explicitDeadline = time.Time{}
 	} else if !c.established {
 		c.handshakeDeadline = deadline
+	} else {
+		c.explicitDeadline = deadline
 	}
+	err := c.Conn.SetDeadline(deadline)
 	c.mu.Unlock()
-	return c.Conn.SetDeadline(deadline)
+	return err
 }
 
 func (c *rabbitMQDeadlineConn) Write(payload []byte) (int, error) {
 	c.mu.RLock()
 	established := c.established
 	handshakeDeadline := c.handshakeDeadline
-	c.mu.RUnlock()
+	explicitDeadline := c.explicitDeadline
 
 	deadline := handshakeDeadline
 	if established {
 		deadline = time.Now().Add(c.writeTimeout)
+		if !explicitDeadline.IsZero() && explicitDeadline.Before(deadline) {
+			deadline = explicitDeadline
+		}
 	}
 	if !deadline.IsZero() {
 		if err := c.Conn.SetWriteDeadline(deadline); err != nil {
+			c.mu.RUnlock()
 			return 0, err
 		}
 	}
+	c.mu.RUnlock()
 	return c.Conn.Write(payload)
 }
 
@@ -384,6 +394,12 @@ func (q *RabbitMQQueue) Ping(ctx context.Context) error {
 	if conn == nil {
 		return ErrQueueConsumerClosed
 	}
+	return q.runRabbitMQOperation(ctx, conn, func() error {
+		return q.pingConnection(ctx, conn)
+	})
+}
+
+func (q *RabbitMQQueue) pingConnection(ctx context.Context, conn *amqp.Connection) error {
 	channel, err := conn.Channel()
 	if err != nil {
 		q.invalidateConnection(ctx, conn)
@@ -474,6 +490,12 @@ func (q *RabbitMQQueue) repairTopology(ctx context.Context) error {
 }
 
 func (q *RabbitMQQueue) repairTopologyOnConnection(ctx context.Context, conn *amqp.Connection) error {
+	return q.runRabbitMQOperation(ctx, conn, func() error {
+		return q.repairTopologyOnConnectionUnbounded(ctx, conn)
+	})
+}
+
+func (q *RabbitMQQueue) repairTopologyOnConnectionUnbounded(ctx context.Context, conn *amqp.Connection) error {
 	channel, err := conn.Channel()
 	if err != nil {
 		return err
@@ -539,12 +561,16 @@ func (q *RabbitMQQueue) acquireTopologyRecoveryLock(ctx context.Context) (func()
 		if err != nil {
 			return nil, err
 		}
-		channel, err := connection.Channel()
-		if err != nil {
-			_ = q.closeConnection(ctx, connection)
-			return nil, err
-		}
-		_, err = channel.QueueDeclare(lockName, false, true, true, false, nil)
+		var channel *amqp.Channel
+		err = q.runRabbitMQOperation(ctx, connection, func() error {
+			var channelErr error
+			channel, channelErr = connection.Channel()
+			if channelErr != nil {
+				return channelErr
+			}
+			_, channelErr = channel.QueueDeclare(lockName, false, true, true, false, nil)
+			return channelErr
+		})
 		if err == nil {
 			return func() {
 				_ = q.closeConnection(ctx, connection)
@@ -907,7 +933,13 @@ func (q *RabbitMQQueue) openTopologyChannel(ctx context.Context, conn *amqp.Conn
 	if err := q.repairTopologyOnConnection(ctx, conn); err != nil {
 		return nil, err
 	}
-	return conn.Channel()
+	var channel *amqp.Channel
+	err := q.runRabbitMQOperation(ctx, conn, func() error {
+		var channelErr error
+		channel, channelErr = conn.Channel()
+		return channelErr
+	})
+	return channel, err
 }
 
 func (q *RabbitMQQueue) acquireReconnect(ctx context.Context) error {
@@ -1018,6 +1050,23 @@ func (q *RabbitMQQueue) closeConnection(ctx context.Context, conn *amqp.Connecti
 		return nil
 	}
 	return err
+}
+
+func (q *RabbitMQQueue) runRabbitMQOperation(ctx context.Context, conn *amqp.Connection, operation func() error) error {
+	result := make(chan error, 1)
+	go func() {
+		result <- operation()
+	}()
+
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		q.invalidateConnection(ctx, conn)
+		return ctx.Err()
+	case <-q.done:
+		return context.Canceled
+	}
 }
 
 func (q *RabbitMQQueue) Close() error {

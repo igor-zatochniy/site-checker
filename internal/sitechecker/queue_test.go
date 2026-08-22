@@ -241,6 +241,27 @@ func TestRabbitMQDeadlineConnPreservesHandshakeDeadline(t *testing.T) {
 	}
 }
 
+func TestRabbitMQDeadlineConnPreservesEarlierEstablishedDeadline(t *testing.T) {
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+
+	conn := &rabbitMQDeadlineConn{Conn: client, writeTimeout: 750 * time.Millisecond}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+
+	startedAt := time.Now()
+	_, err := conn.Write([]byte("blocked close"))
+	assertNetworkTimeout(t, err)
+	if elapsed := time.Since(startedAt); elapsed > 300*time.Millisecond {
+		t.Fatalf("blocked established write returned after %s, want explicit deadline to take precedence", elapsed)
+	}
+}
+
 func assertNetworkTimeout(t *testing.T, err error) {
 	t.Helper()
 	if err == nil {

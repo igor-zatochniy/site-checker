@@ -4,6 +4,7 @@ package sitechecker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -342,6 +343,14 @@ func testRabbitMQHalfOpenTeardown(t *testing.T, ctx context.Context, endpoint st
 		t.Fatal(err)
 	}
 	defer closeQueue.Close()
+	pingConfig := config
+	pingConfig.QueueName = "site_checker.integration.half_open.ping"
+	pingConfig.DeadLetterQueueName = "site_checker.integration.half_open.ping.dead"
+	pingQueue, err := NewRabbitMQQueue(pingConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pingQueue.Close()
 
 	consumeCtx, cancelConsume := context.WithCancel(ctx)
 	deliveries, _, err := shutdownQueue.Consume(consumeCtx)
@@ -360,7 +369,18 @@ func testRabbitMQHalfOpenTeardown(t *testing.T, ctx context.Context, endpoint st
 	}
 
 	proxy.DropBrokerResponses()
+	pingCtx, cancelPing := context.WithTimeout(ctx, 200*time.Millisecond)
 	startedAt := time.Now()
+	pingErr := pingQueue.Ping(pingCtx)
+	cancelPing()
+	if !errors.Is(pingErr, context.DeadlineExceeded) {
+		t.Fatalf("half-open ping error = %v, want context deadline exceeded", pingErr)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 2*time.Second {
+		t.Fatalf("half-open ping returned after %s, want context-bounded topology check", elapsed)
+	}
+
+	startedAt = time.Now()
 	publishErr := publishQueue.Publish(ctx, CheckJobMessage{
 		JobID:      "job_half_open_publish",
 		MonitorID:  "mon_half_open",
