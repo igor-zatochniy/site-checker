@@ -23,23 +23,24 @@ var (
 )
 
 const (
-	monitorStatusActive      = "active"
-	monitorStatusDisabled    = "disabled"
-	incidentStatusOpen       = "open"
-	incidentStatusResolved   = "resolved"
-	checkJobStatusScheduled  = "scheduled"
-	checkJobStatusQueued     = "queued"
-	checkJobStatusProcessing = "processing"
-	checkJobStatusCompleted  = "completed"
-	checkJobStatusFailed     = "failed"
-	checkJobStatusDead       = "dead"
-	checkJobKindScheduled    = "scheduled"
-	checkJobKindManual       = "manual"
-	minMonitorTimeoutSeconds = 1
-	maxMonitorTimeoutSeconds = 60
-	maxChecksPerMonitor      = 500
-	maxProcessedJobIDs       = 10_000
-	maxRetainedCheckJobs     = 10_000
+	monitorStatusActive          = "active"
+	monitorStatusDisabled        = "disabled"
+	incidentStatusOpen           = "open"
+	incidentStatusResolved       = "resolved"
+	checkJobStatusScheduled      = "scheduled"
+	checkJobStatusQueued         = "queued"
+	checkJobStatusProcessing     = "processing"
+	checkJobStatusCompleted      = "completed"
+	checkJobStatusFailed         = "failed"
+	checkJobStatusDead           = "dead"
+	checkJobKindScheduled        = "scheduled"
+	checkJobKindManual           = "manual"
+	minMonitorTimeoutSeconds     = 1
+	maxMonitorTimeoutSeconds     = 60
+	maxChecksPerMonitor          = 500
+	maxProcessedJobIDs           = 10_000
+	maxRetainedCheckJobs         = 10_000
+	maxRetainedResolvedIncidents = 10_000
 )
 
 type Monitor struct {
@@ -159,6 +160,8 @@ type MonitorStore struct {
 	terminalJobHead       int
 	incidents             map[string]Incident
 	openIncidentByMonitor map[string]string
+	resolvedIncidentOrder []string
+	resolvedIncidentHead  int
 	processedJobs         map[string]struct{}
 	processedJobOrder     []string
 	processedJobHead      int
@@ -175,6 +178,7 @@ func NewMonitorStore(policy *NetworkPolicy) *MonitorStore {
 		terminalJobOrder:      make([]string, 0, maxRetainedCheckJobs),
 		incidents:             make(map[string]Incident),
 		openIncidentByMonitor: make(map[string]string),
+		resolvedIncidentOrder: make([]string, 0, maxRetainedResolvedIncidents),
 		processedJobs:         make(map[string]struct{}),
 		processedJobOrder:     make([]string, 0, maxProcessedJobIDs),
 	}
@@ -385,6 +389,7 @@ func (s *MonitorStore) resolveOpenIncidentLocked(monitorID string, now time.Time
 	incident.UpdatedAt = now.UTC()
 	s.incidents[incidentID] = incident
 	delete(s.openIncidentByMonitor, monitorID)
+	s.rememberResolvedIncidentLocked(incidentID)
 }
 
 func (s *MonitorStore) Delete(id string) error {
@@ -927,6 +932,7 @@ func (s *MonitorStore) updateIncident(record CheckRecord, now time.Time) {
 		incident.UpdatedAt = now
 		s.incidents[incidentID] = incident
 		delete(s.openIncidentByMonitor, record.MonitorID)
+		s.rememberResolvedIncidentLocked(incidentID)
 		return
 	}
 
@@ -958,6 +964,22 @@ func (s *MonitorStore) updateIncident(record CheckRecord, now time.Time) {
 	}
 	s.incidents[incident.ID] = incident
 	s.openIncidentByMonitor[record.MonitorID] = incident.ID
+}
+
+func (s *MonitorStore) rememberResolvedIncidentLocked(incidentID string) {
+	s.resolvedIncidentOrder = append(s.resolvedIncidentOrder, incidentID)
+	for len(s.resolvedIncidentOrder)-s.resolvedIncidentHead > maxRetainedResolvedIncidents {
+		oldest := s.resolvedIncidentOrder[s.resolvedIncidentHead]
+		s.resolvedIncidentHead++
+		incident, exists := s.incidents[oldest]
+		if exists && incident.Status == incidentStatusResolved {
+			delete(s.incidents, oldest)
+		}
+	}
+	if s.resolvedIncidentHead > maxRetainedResolvedIncidents && s.resolvedIncidentHead*2 >= len(s.resolvedIncidentOrder) {
+		s.resolvedIncidentOrder = append([]string(nil), s.resolvedIncidentOrder[s.resolvedIncidentHead:]...)
+		s.resolvedIncidentHead = 0
+	}
 }
 
 func (s *MonitorStore) ListChecks(id string, offset, limit int) ([]CheckRecord, int, error) {

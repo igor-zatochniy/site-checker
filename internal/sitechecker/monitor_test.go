@@ -751,6 +751,67 @@ func TestMonitorStoreBoundsTerminalCheckJobs(t *testing.T) {
 	}
 }
 
+func TestMonitorStoreBoundsResolvedIncidents(t *testing.T) {
+	store := NewMonitorStore(nil)
+	now := time.Now().UTC()
+	var oldestIncidentID string
+	var latestIncidentID string
+
+	store.mu.Lock()
+	for index := range maxRetainedResolvedIncidents + 5 {
+		monitorID := fmt.Sprintf("monitor_%d", index)
+		checkedAt := now.Add(time.Duration(index) * time.Second)
+		store.updateIncident(CheckRecord{
+			MonitorID: monitorID,
+			Error:     "check failed",
+			Success:   false,
+			CheckedAt: checkedAt,
+		}, checkedAt)
+		incidentID := store.openIncidentByMonitor[monitorID]
+		if index == 0 {
+			oldestIncidentID = incidentID
+		}
+		latestIncidentID = incidentID
+		store.updateIncident(CheckRecord{
+			MonitorID: monitorID,
+			Success:   true,
+			CheckedAt: checkedAt.Add(time.Millisecond),
+		}, checkedAt.Add(time.Millisecond))
+	}
+
+	openMonitorID := "monitor_open"
+	store.updateIncident(CheckRecord{
+		MonitorID: openMonitorID,
+		Error:     "still failing",
+		Success:   false,
+		CheckedAt: now.Add(24 * time.Hour),
+	}, now.Add(24*time.Hour))
+	openIncidentID := store.openIncidentByMonitor[openMonitorID]
+	resolvedCount := 0
+	for _, incident := range store.incidents {
+		if incident.Status == incidentStatusResolved {
+			resolvedCount++
+		}
+	}
+	_, oldestExists := store.incidents[oldestIncidentID]
+	latest, latestExists := store.incidents[latestIncidentID]
+	openIncident, openExists := store.incidents[openIncidentID]
+	store.mu.Unlock()
+
+	if resolvedCount != maxRetainedResolvedIncidents {
+		t.Fatalf("resolved incidents = %d, want %d", resolvedCount, maxRetainedResolvedIncidents)
+	}
+	if oldestExists {
+		t.Fatal("oldest resolved incident was not evicted")
+	}
+	if !latestExists || latest.Status != incidentStatusResolved {
+		t.Fatal("latest resolved incident was evicted")
+	}
+	if !openExists || openIncident.Status != incidentStatusOpen {
+		t.Fatal("open incident was evicted")
+	}
+}
+
 func TestMonitorStoreStats(t *testing.T) {
 	cfg := testCheckerConfig(t)
 	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}
