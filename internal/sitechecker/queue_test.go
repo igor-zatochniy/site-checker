@@ -3,6 +3,7 @@ package sitechecker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -154,6 +155,85 @@ func TestInMemoryQueueInfrastructureRequeuePreservesAttempt(t *testing.T) {
 	if err := second.Ack(ctx); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestInMemoryQueueEnqueueRejectsClosedQueue(t *testing.T) {
+	queue := NewInMemoryQueue(1, 2)
+	if err := queue.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	err := queue.enqueue(context.Background(), CheckJobMessage{JobID: "job_after_close"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("enqueue after close error = %v, want context canceled", err)
+	}
+}
+
+func TestInMemoryQueueCloseConcurrentWithQueueOperations(t *testing.T) {
+	const iterations = 200
+
+	for iteration := range iterations {
+		t.Run(fmt.Sprintf("iteration_%d", iteration), func(t *testing.T) {
+			queue := NewInMemoryQueue(4, 3)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			seed := CheckJobMessage{
+				JobID:      fmt.Sprintf("job_close_race_%d", iteration),
+				MonitorID:  "mon_close_race",
+				Attempt:    1,
+				EnqueuedAt: time.Now().UTC(),
+			}
+			if err := queue.Publish(ctx, seed); err != nil {
+				t.Fatal(err)
+			}
+			deliveries, _, err := queue.Consume(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requeueDelivery := receiveDelivery(t, deliveries)
+
+			retry := seed
+			retry.JobID += "_retry"
+			if err := queue.Publish(ctx, retry); err != nil {
+				t.Fatal(err)
+			}
+			nackDelivery := receiveDelivery(t, deliveries)
+
+			start := make(chan struct{})
+			results := make(chan error, 3)
+			go func() {
+				<-start
+				job := seed
+				job.JobID += "_publish"
+				results <- queue.Publish(ctx, job)
+			}()
+			go func() {
+				<-start
+				results <- requeueDelivery.Requeue(ctx)
+			}()
+			go func() {
+				<-start
+				results <- nackDelivery.Nack(ctx, true)
+			}()
+
+			close(start)
+			if err := queue.Close(); err != nil {
+				t.Fatal(err)
+			}
+			for range 3 {
+				assertInMemoryQueueShutdownError(t, <-results)
+			}
+		})
+	}
+}
+
+func assertInMemoryQueueShutdownError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, ErrQueueFull) {
+		return
+	}
+	t.Fatalf("queue operation during close error = %v, want nil, context canceled, or queue full", err)
 }
 
 func receiveDelivery(t *testing.T, deliveries <-chan QueueDelivery) QueueDelivery {

@@ -172,6 +172,11 @@ func (q *InMemoryQueue) forget(jobID string) {
 }
 
 func (q *InMemoryQueue) enqueue(ctx context.Context, job CheckJobMessage) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed {
+		return context.Canceled
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
