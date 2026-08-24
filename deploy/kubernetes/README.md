@@ -6,8 +6,7 @@ This directory contains a split backend-platform deployment for Site Checker:
 - Scheduler deployment: 1 replica.
 - Worker deployment: 3 replicas by default.
 - Optional Alert Dispatcher deployment: 1 replica for persisted webhook delivery.
-- PostgreSQL demo deployment for monitors, check history, incidents, and the alert outbox.
-- RabbitMQ demo deployment for check jobs and dead-letter handling.
+- Optional local-demo overlay with PostgreSQL and RabbitMQ deployments.
 - Optional KEDA scaling by RabbitMQ queue length.
 - NetworkPolicy default-deny baseline with explicit ingress and egress allowances.
 - ConfigMap, Services, probes, resource requests and limits.
@@ -22,14 +21,28 @@ Apply locally:
 cp deploy/kubernetes/secret.example.yaml deploy/kubernetes/local/secret.yaml
 kubectl apply -f deploy/kubernetes/namespace.yaml
 kubectl apply -f deploy/kubernetes/local/secret.yaml
-kubectl apply -k deploy/kubernetes/
+kubectl apply -k deploy/kubernetes-overlays/local-demo/
 ```
 
-The Kustomize base contains a fixed image tag and never uses `latest`. For every `v*` Git tag, CI pushes the release image, records its registry digest, and uploads a rendered manifest named `site-checker-kubernetes-vX.Y.Z.yaml`. Production deployments should apply that artifact because all Site Checker roles reference the immutable `image@sha256:...` value:
+The Kustomize base contains only Site Checker application roles; demo PostgreSQL and RabbitMQ are supplied exclusively by `kubernetes-overlays/local-demo`. The base also contains a fixed image tag and never uses `latest`.
+
+For every `v*` Git tag, CI pushes the release image, records its registry digest, and uploads a rendered manifest named `site-checker-kubernetes-vX.Y.Z.yaml`. Production deployments should apply that artifact because all Site Checker roles reference the immutable `image@sha256:...` value:
 
 ```bash
 kubectl apply -f site-checker-kubernetes-vX.Y.Z.yaml
 ```
+
+The release bundle also contains `site-checker-managed-backends-egress-vX.Y.Z.yaml`. Before deploying with managed PostgreSQL or RabbitMQ, replace its documentation-only CIDRs with the smallest environment-specific endpoint CIDRs, create the namespace and managed Secret, apply the egress policy, and then apply the digest-pinned application manifest:
+
+```bash
+kubectl apply -f deploy/kubernetes/namespace.yaml
+# Configure site-checker-secret through the production secret manager first.
+# Edit the two example CIDRs before applying this policy.
+kubectl apply -f site-checker-managed-backends-egress-vX.Y.Z.yaml
+kubectl apply -f site-checker-kubernetes-vX.Y.Z.yaml
+```
+
+The managed-backend policy permits API and Alert Dispatcher access to PostgreSQL on TCP 5432, plus Scheduler and Worker access to PostgreSQL and RabbitMQ on TCP 5432, 5671, and 5672. The checked-in TEST-NET CIDRs intentionally match no production backend and keep the template fail-closed until they are replaced. Include every address returned by managed-service DNS and update the policy before endpoint rotation.
 
 Check workloads:
 
@@ -60,7 +73,7 @@ Expected behavior:
 - 3 workers: queue backlog should stabilize for moderate load.
 - 6 workers: backlog should drain faster if outbound checks are the bottleneck.
 
-The included PostgreSQL and RabbitMQ manifests are suitable for local demonstration. For production, prefer managed PostgreSQL and RabbitMQ or hardened StatefulSets with backups, persistence, TLS, monitoring, and secret rotation.
+The PostgreSQL and RabbitMQ manifests in the local-demo overlay are suitable only for local demonstration. Production must use managed services or hardened StatefulSets with backups, persistence, TLS, monitoring, and secret rotation. External managed services also require the managed-backends egress policy described above; the default-deny base intentionally does not allow arbitrary database or broker destinations.
 
 The base NetworkPolicy allows checked and webhook destinations through public IPv4 ranges on TCP 80/443 only. It intentionally has no IPv6 egress rule because Kubernetes NetworkPolicy cannot express the same public-only boundary without an explicit IPv6 CIDR policy. Clusters that require IPv6 monitoring must add CNI-specific IPv6 rules with equivalent exclusions for loopback, link-local, unique-local, documentation, multicast, and other non-public ranges before enabling IPv6 destinations.
 
@@ -77,10 +90,12 @@ Keep each `ipBlock` limited to the required destination range. The overlay enabl
 The base does not start the optional Alert Dispatcher. Set a non-empty `ALERT_WEBHOOK_URL` in the managed Secret before enabling it; the process intentionally fails startup when this required setting is missing. Then apply the optional deployment:
 
 ```bash
+kubectl -n site-checker rollout restart deployment/site-checker-worker
+kubectl -n site-checker rollout status deployment/site-checker-worker
 kubectl apply -k deploy/kubernetes/alerts/
 ```
 
-Workers create transactional alert events only when the same webhook setting is configured for them.
+Workers create transactional alert events only when the same webhook setting is configured for them. Kubernetes does not refresh environment variables in running containers after a Secret update, so the worker rollout is mandatory when alerts are enabled or the webhook value changes after initial deployment.
 For production releases, apply the digest-pinned `site-checker-alerts-vX.Y.Z.yaml` artifact uploaded by release CI instead of the source overlay.
 
 The scheduler enables retention with these defaults: check results 90 days, terminal jobs and delivered/dead outbox events 30 days, and resolved incidents 365 days. Cleanup deletes at most 10,000 rows per table each minute and never removes active jobs, pending/processing alerts, open incidents, or incidents that still have outbox rows. Adjust the retention values in `configmap.yaml` before deployment when longer history is required.

@@ -66,6 +66,32 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
 
+      - name: Set up kubectl for manifest validation
+        uses: azure/setup-kubectl@c0c8b32d33a5244f1e5947304550403b63930415 # v4
+        with:
+          version: v1.32.2
+
+      - name: Validate Kubernetes deployment paths
+        run: |
+          set -euo pipefail
+          base_manifest="$(mktemp)"
+          local_manifest="$(mktemp)"
+          managed_manifest="$(mktemp)"
+          kubectl kustomize deploy/kubernetes > "${base_manifest}"
+          kubectl kustomize deploy/kubernetes-overlays/local-demo > "${local_manifest}"
+          kubectl kustomize deploy/kubernetes-overlays/managed-backends > "${managed_manifest}"
+
+          ! grep -q '^  name: site-checker-postgres$' "${base_manifest}"
+          ! grep -q '^  name: site-checker-rabbitmq$' "${base_manifest}"
+          test "$(grep -c '^  name: site-checker-postgres$' "${local_manifest}")" -eq 2
+          test "$(grep -c '^  name: site-checker-rabbitmq$' "${local_manifest}")" -eq 2
+          test "$(grep -c '^kind: NetworkPolicy$' "${managed_manifest}")" -eq 4
+          test "$(grep -c 'port: 5432' "${managed_manifest}")" -eq 4
+          test "$(grep -c 'port: 5671' "${managed_manifest}")" -eq 2
+          test "$(grep -c 'port: 5672' "${managed_manifest}")" -eq 2
+          test "$(grep -c 'cidr: 192.0.2.10/32' "${managed_manifest}")" -eq 4
+          test "$(grep -c 'cidr: 198.51.100.10/32' "${managed_manifest}")" -eq 2
+
   docker:
     name: Build container
     runs-on: ubuntu-latest
@@ -157,6 +183,7 @@ jobs:
           EOF
           kubectl kustomize dist/release > "dist/site-checker-kubernetes-${RELEASE_TAG}.yaml"
           printf '%s\n' "${IMAGE_NAME}@${IMAGE_DIGEST}" > "dist/site-checker-image-${RELEASE_TAG}.txt"
+          cp deploy/kubernetes-overlays/managed-backends/managed-backends-egress.yaml "dist/site-checker-managed-backends-egress-${RELEASE_TAG}.yaml"
           test "$(grep -cF "image: ${IMAGE_NAME}@${IMAGE_DIGEST}" "dist/site-checker-kubernetes-${RELEASE_TAG}.yaml")" -eq 3
           mkdir -p dist/release-alerts
           cat > dist/release-alerts/kustomization.yaml <<EOF
@@ -180,6 +207,7 @@ jobs:
           path: |
             dist/site-checker-kubernetes-${{ github.ref_name }}.yaml
             dist/site-checker-alerts-${{ github.ref_name }}.yaml
+            dist/site-checker-managed-backends-egress-${{ github.ref_name }}.yaml
             dist/site-checker-image-${{ github.ref_name }}.txt
           if-no-files-found: error
 

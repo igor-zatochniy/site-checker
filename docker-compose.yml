@@ -61,9 +61,14 @@ services:
       QUEUE_TYPE: rabbitmq
       RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/"
       SEED_DEFAULT_LINKS: ${SEED_DEFAULT_LINKS:-false}
-      SEED_URLS_FILE: ${SEED_URLS_FILE:-}
+      SEED_URLS_FILE: "${SEED_URLS_FILE:+/config/seed-urls.txt}"
       RETENTION_ENABLED: "true"
       HEALTH_ADDR: :8080
+    volumes:
+      - type: bind
+        source: "${SEED_URLS_FILE:-./urls.example.txt}"
+        target: /config/seed-urls.txt
+        read_only: true
     depends_on:
       postgres:
         condition: service_healthy

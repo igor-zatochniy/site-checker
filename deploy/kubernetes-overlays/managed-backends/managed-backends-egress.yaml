@@ -1,0 +1,113 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: site-checker-api-managed-postgres-egress
+  namespace: site-checker
+  labels:
+    app.kubernetes.io/name: site-checker
+    app.kubernetes.io/component: api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: site-checker
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            # Replace with the smallest CIDR containing every managed PostgreSQL endpoint IP.
+            cidr: 192.0.2.10/32
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: site-checker-scheduler-managed-backends-egress
+  namespace: site-checker
+  labels:
+    app.kubernetes.io/name: site-checker
+    app.kubernetes.io/component: scheduler
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: site-checker
+      app.kubernetes.io/component: scheduler
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            # Replace with the smallest CIDR containing every managed PostgreSQL endpoint IP.
+            cidr: 192.0.2.10/32
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - ipBlock:
+            # Replace with the smallest CIDR containing every managed RabbitMQ endpoint IP.
+            cidr: 198.51.100.10/32
+      ports:
+        - protocol: TCP
+          port: 5671
+        - protocol: TCP
+          port: 5672
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: site-checker-worker-managed-backends-egress
+  namespace: site-checker
+  labels:
+    app.kubernetes.io/name: site-checker
+    app.kubernetes.io/component: worker
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: site-checker
+      app.kubernetes.io/component: worker
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            # Replace with the smallest CIDR containing every managed PostgreSQL endpoint IP.
+            cidr: 192.0.2.10/32
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - ipBlock:
+            # Replace with the smallest CIDR containing every managed RabbitMQ endpoint IP.
+            cidr: 198.51.100.10/32
+      ports:
+        - protocol: TCP
+          port: 5671
+        - protocol: TCP
+          port: 5672
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: site-checker-alert-dispatcher-managed-postgres-egress
+  namespace: site-checker
+  labels:
+    app.kubernetes.io/name: site-checker
+    app.kubernetes.io/component: alert-dispatcher
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: site-checker
+      app.kubernetes.io/component: alert-dispatcher
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            # Replace with the smallest CIDR containing every managed PostgreSQL endpoint IP.
+            cidr: 192.0.2.10/32
+      ports:
+        - protocol: TCP
+          port: 5432

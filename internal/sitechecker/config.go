@@ -159,7 +159,7 @@ func LoadConfig() (Config, error) {
 	cfg.CheckLeaseTimeout = envDuration(
 		"CHECK_LEASE_TIMEOUT",
 		defaultCheckLeaseTimeout,
-		time.Duration(maxMonitorTimeoutSeconds)*time.Second+processingLeaseSafetyMargin,
+		minimumCheckLeaseTimeout(cfg.DatabaseOperationTimeout, cfg.RabbitMQPublishTimeout),
 		24*time.Hour,
 		&errs,
 	)
@@ -300,6 +300,12 @@ func LoadConfig() (Config, error) {
 		return Config{}, errors.Join(errs...)
 	}
 	return cfg, nil
+}
+
+func minimumCheckLeaseTimeout(databaseOperationTimeout, rabbitMQPublishTimeout time.Duration) time.Duration {
+	processingBudget := time.Duration(maxMonitorTimeoutSeconds)*time.Second + databaseOperationTimeout
+	publicationBudget := rabbitMQPublishTimeout + databaseOperationTimeout
+	return max(processingBudget, publicationBudget) + processingLeaseSafetyMargin
 }
 
 func rabbitMQHeartbeatDisabled(rawURL string) bool {

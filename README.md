@@ -93,6 +93,8 @@ GET    /api/v1/incidents
 
 `POST /api/v1/monitors/{id}/check` persists an asynchronous manual job and returns `202 Accepted`. The scheduler and workers process it through the same PostgreSQL and RabbitMQ lifecycle as periodic checks; the API role does not require external HTTP egress.
 
+`expected_status` is compared with the final HTTP response after all permitted redirects. Intermediate `3xx` responses are intentionally not matched.
+
 API-enabled roles fail at startup unless authentication is configured. Set an `API_KEY` with at least 24 characters and send either:
 
 ```text
@@ -140,6 +142,8 @@ Docker Compose mode:
 cp .env.example .env
 docker compose up --build
 ```
+
+In Compose, `SEED_URLS_FILE` is a host path. When it is non-empty, Compose mounts that file read-only as `/config/seed-urls.txt` inside the scheduler. An empty value disables file seeding.
 
 Enable the optional alert dispatcher after setting a webhook URL:
 
@@ -340,7 +344,7 @@ Expected demonstration:
 | `MAX_JOB_ATTEMPTS` | `3` | Strict maximum processing attempts. PostgreSQL lease recovery terminalizes an expired final attempt without publishing another delivery. |
 | `WORKER_COUNT` | `10` | Number of worker goroutines in each worker process. |
 | `SCHEDULER_BATCH_SIZE` | `100` | Number of due monitors claimed per scheduler tick. |
-| `CHECK_LEASE_TIMEOUT` | `2m` | Bounds publication claims and processing recovery leases. Confirmed queued deliveries do not expire by time. It must be at least 90 seconds: the maximum 60-second monitor timeout plus a 30-second persistence margin. |
+| `CHECK_LEASE_TIMEOUT` | `2m` | Bounds publication claims and processing recovery leases. Confirmed queued deliveries do not expire by time. It must be at least `max(60s + DATABASE_OPERATION_TIMEOUT, RABBITMQ_PUBLISH_TIMEOUT + DATABASE_OPERATION_TIMEOUT) + 30s`; the default minimum is `105s`. |
 | `CHECK_INTERVAL` | `5m` | Default interval for seeded monitors. |
 | `HTTP_TIMEOUT` | `5s` | Default `timeout_seconds` for seeded monitors. Each monitor context owns its actual timeout; this value is not a global client cap. |
 | `HEALTH_ADDR` | `:8080` | Address for REST, health, and metrics endpoints. Must not be empty for `api` and `all` roles. |

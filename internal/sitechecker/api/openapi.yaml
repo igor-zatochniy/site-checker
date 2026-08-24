@@ -252,6 +252,7 @@ components:
           type: integer
           minimum: 100
           maximum: 599
+          description: Exact status expected from the final response after all permitted redirects; intermediate redirect statuses are not matched.
           example: 200
         enabled:
           type: boolean
@@ -275,6 +276,7 @@ components:
           type: integer
           minimum: 100
           maximum: 599
+          description: Exact status expected from the final response after all permitted redirects; intermediate redirect statuses are not matched.
         enabled:
           type: boolean
     Monitor:

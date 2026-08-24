@@ -522,13 +522,47 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 	}
 }
 
-func TestLoadConfigRejectsCheckLeaseBelowMaximumMonitorTimeoutMargin(t *testing.T) {
-	cleanConfigEnv(t)
-	t.Setenv("HTTP_TIMEOUT", "5s")
-	t.Setenv("CHECK_LEASE_TIMEOUT", "89s")
+func TestMinimumCheckLeaseTimeoutIncludesOperationBudgets(t *testing.T) {
+	tests := []struct {
+		name               string
+		databaseTimeout    time.Duration
+		publicationTimeout time.Duration
+		want               time.Duration
+	}{
+		{
+			name:               "processing budget",
+			databaseTimeout:    5 * time.Minute,
+			publicationTimeout: 10 * time.Second,
+			want:               6*time.Minute + 30*time.Second,
+		},
+		{
+			name:               "publication budget",
+			databaseTimeout:    15 * time.Second,
+			publicationTimeout: 5 * time.Minute,
+			want:               5*time.Minute + 45*time.Second,
+		},
+	}
 
-	if _, err := LoadConfig(); err == nil {
-		t.Fatal("expected CHECK_LEASE_TIMEOUT below maximum monitor timeout margin to be rejected")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := minimumCheckLeaseTimeout(test.databaseTimeout, test.publicationTimeout); got != test.want {
+				t.Fatalf("minimum check lease timeout = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
+func TestLoadConfigRejectsCheckLeaseBelowOperationBudget(t *testing.T) {
+	cleanConfigEnv(t)
+	t.Setenv("CHECK_LEASE_TIMEOUT", "104s")
+
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "CHECK_LEASE_TIMEOUT") {
+		t.Fatalf("LoadConfig error = %v, want CHECK_LEASE_TIMEOUT operation-budget validation", err)
+	}
+
+	t.Setenv("CHECK_LEASE_TIMEOUT", "105s")
+	if _, err := LoadConfig(); err != nil {
+		t.Fatalf("LoadConfig rejected minimum valid CHECK_LEASE_TIMEOUT: %v", err)
 	}
 }
 

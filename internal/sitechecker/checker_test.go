@@ -61,3 +61,31 @@ func TestCheckerMarksUnexpectedStatusUnhealthy(t *testing.T) {
 		t.Fatalf("StatusCode = %d, want 500", result.StatusCode)
 	}
 }
+
+func TestCheckerExpectedStatusUsesFinalRedirectResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/old" {
+			http.Redirect(w, r, "/new", http.StatusMovedPermanently)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := testCheckerConfig(t)
+	policy, err := ParseStatusPolicy("301")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ExpectedStatus = policy
+
+	checker := NewChecker(server.Client(), cfg, nil)
+	result := checker.Check(t.Context(), CheckJob{URL: server.URL + "/old"})
+
+	if result.Healthy {
+		t.Fatal("result.Healthy = true, want false for final status 200")
+	}
+	if result.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want final status 200", result.StatusCode)
+	}
+}
