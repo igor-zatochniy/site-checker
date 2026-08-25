@@ -1,8 +1,10 @@
 package sitechecker
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -88,4 +90,32 @@ func TestCheckerExpectedStatusUsesFinalRedirectResponse(t *testing.T) {
 	if result.StatusCode != http.StatusOK {
 		t.Fatalf("StatusCode = %d, want final status 200", result.StatusCode)
 	}
+}
+
+func TestCheckerTransportErrorDoesNotPersistURLSecrets(t *testing.T) {
+	const (
+		secretPath  = "SECRET_PATH"
+		secretQuery = "SECRET_QUERY"
+	)
+	client := &http.Client{Transport: checkerRoundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("dial tcp: connection refused")
+	})}
+	checker := NewChecker(client, testCheckerConfig(t), nil)
+
+	result := checker.Check(t.Context(), CheckJob{
+		URL: "https://example.com/" + secretPath + "?token=" + secretQuery,
+	})
+
+	if !strings.Contains(result.Error, "connection refused") {
+		t.Fatalf("sanitized transport error lost its cause: %q", result.Error)
+	}
+	if strings.Contains(result.Error, secretPath) || strings.Contains(result.Error, secretQuery) {
+		t.Fatalf("transport error leaked URL secret: %q", result.Error)
+	}
+}
+
+type checkerRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f checkerRoundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }

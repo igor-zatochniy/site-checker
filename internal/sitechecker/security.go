@@ -126,9 +126,33 @@ func (p *NetworkPolicy) CheckRedirect(req *http.Request, via []*http.Request) er
 		return fmt.Errorf("stopped after %d redirects", p.maxRedirects)
 	}
 	if err := p.ValidateParsedURL(req.URL); err != nil {
-		return fmt.Errorf("blocked redirect to %s: %w", req.URL.Redacted(), err)
+		return fmt.Errorf("blocked redirect to %s: %w", redactedURLOrigin(req.URL), err)
 	}
 	return nil
+}
+
+func redactedURLOrigin(parsed *url.URL) string {
+	if parsed == nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "<invalid URL>"
+	}
+
+	redacted := *parsed
+	redacted.User = nil
+	redacted.Path = ""
+	redacted.RawPath = ""
+	redacted.RawQuery = ""
+	redacted.ForceQuery = false
+	redacted.Fragment = ""
+	redacted.RawFragment = ""
+	return redacted.String()
+}
+
+func redactedURLOriginFromRaw(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "<invalid URL>"
+	}
+	return redactedURLOrigin(parsed)
 }
 
 func (p *NetworkPolicy) Proxy(req *http.Request) (*url.URL, error) {

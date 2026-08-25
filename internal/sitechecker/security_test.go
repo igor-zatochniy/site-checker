@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -260,6 +261,32 @@ func TestCheckRedirectAllowsExactlyConfiguredRedirectCount(t *testing.T) {
 	})
 	if err := policy.CheckRedirect(request, []*http.Request{{}}); err == nil {
 		t.Fatal("redirect was allowed with MAX_REDIRECTS=0")
+	}
+}
+
+func TestCheckRedirectErrorDoesNotExposeURLSecrets(t *testing.T) {
+	const (
+		secretPath     = "SECRET_PATH"
+		secretQuery    = "SECRET_QUERY"
+		secretFragment = "SECRET_FRAGMENT"
+	)
+	target, err := url.Parse("http://127.0.0.1/" + secretPath + "?token=" + secretQuery + "#" + secretFragment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := NewNetworkPolicy(Config{
+		MaxRedirects: 3,
+		AllowedPorts: map[int]struct{}{80: {}},
+	})
+
+	err = policy.CheckRedirect(&http.Request{URL: target}, []*http.Request{{}})
+	if err == nil {
+		t.Fatal("CheckRedirect returned nil for loopback redirect")
+	}
+	for _, secret := range []string{secretPath, secretQuery, secretFragment} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("redirect error leaked URL secret %q: %v", secret, err)
+		}
 	}
 }
 

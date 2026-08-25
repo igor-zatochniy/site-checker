@@ -2,10 +2,12 @@ package sitechecker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 )
@@ -55,7 +57,7 @@ func (c *Checker) Check(ctx context.Context, job CheckJob) (result CheckResult) 
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, job.URL, nil)
 	if err != nil {
-		result.Error = err.Error()
+		result.Error = checkerErrorText(err)
 		return result
 	}
 	req.Header.Set("User-Agent", c.cfg.UserAgent)
@@ -63,7 +65,7 @@ func (c *Checker) Check(ctx context.Context, job CheckJob) (result CheckResult) 
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		result.Error = err.Error()
+		result.Error = checkerErrorText(err)
 		return result
 	}
 	defer resp.Body.Close()
@@ -83,6 +85,17 @@ func (c *Checker) Check(ctx context.Context, job CheckJob) (result CheckResult) 
 
 	result.Healthy = true
 	return result
+}
+
+func checkerErrorText(err error) string {
+	for err != nil {
+		var urlErr *url.Error
+		if !errors.As(err, &urlErr) || urlErr.Err == nil {
+			return err.Error()
+		}
+		err = urlErr.Err
+	}
+	return "request failed"
 }
 
 func (c *Checker) CheckMonitor(ctx context.Context, monitor Monitor) CheckResult {

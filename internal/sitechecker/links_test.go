@@ -3,6 +3,7 @@ package sitechecker
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -63,5 +64,25 @@ func TestLoadLinksFromJSONFile(t *testing.T) {
 	}
 	if len(links) != 2 {
 		t.Fatalf("len(links) = %d, want 2", len(links))
+	}
+}
+
+func TestValidateLinksDoesNotExposeURLSecrets(t *testing.T) {
+	const (
+		secretPath     = "SECRET_PATH"
+		secretQuery    = "SECRET_QUERY"
+		secretFragment = "SECRET_FRAGMENT"
+	)
+	policy := NewNetworkPolicy(Config{})
+	link := "https://localhost/" + secretPath + "?token=" + secretQuery + "#" + secretFragment
+
+	err := ValidateLinks([]string{link}, policy)
+	if err == nil {
+		t.Fatal("ValidateLinks returned nil for localhost URL")
+	}
+	for _, secret := range []string{secretPath, secretQuery, secretFragment} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("validation error leaked URL secret %q: %v", secret, err)
+		}
 	}
 }

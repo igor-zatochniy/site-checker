@@ -23,7 +23,7 @@ func TestRabbitMQQueueRetriesAndDeadLetters(t *testing.T) {
 	defer cancel()
 
 	rabbit, err := testcontainers.Run(ctx,
-		"rabbitmq:4-management-alpine",
+		integrationRabbitMQImage,
 		testcontainers.WithEnv(map[string]string{
 			"RABBITMQ_DEFAULT_USER": "site_checker",
 			"RABBITMQ_DEFAULT_PASS": "site_checker",
@@ -562,7 +562,7 @@ func TestRabbitMQQueueRepairsUnroutablePublish(t *testing.T) {
 	defer cancel()
 
 	rabbit, err := testcontainers.Run(ctx,
-		"rabbitmq:4-management-alpine",
+		integrationRabbitMQImage,
 		testcontainers.WithEnv(map[string]string{
 			"RABBITMQ_DEFAULT_USER": "site_checker",
 			"RABBITMQ_DEFAULT_PASS": "site_checker",

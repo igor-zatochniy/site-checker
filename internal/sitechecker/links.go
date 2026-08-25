@@ -59,7 +59,7 @@ func ValidateLinks(links []string, policy *NetworkPolicy) error {
 
 	for _, link := range links {
 		if err := policy.ValidateURL(link); err != nil {
-			return fmt.Errorf("%s: %w", link, err)
+			return fmt.Errorf("%s: %w", redactedURLOriginFromRaw(link), err)
 		}
 	}
 	return nil

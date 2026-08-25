@@ -19,7 +19,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	defer cancel()
 
 	postgresContainer, err := postgres.Run(ctx,
-		"postgres:16-alpine",
+		integrationPostgresImage,
 		postgres.WithDatabase("site_checker"),
 		postgres.WithUsername("site_checker"),
 		postgres.WithPassword("site_checker"),
@@ -1255,7 +1255,7 @@ func TestPostgresOperationAndMigrationTimeouts(t *testing.T) {
 	defer cancel()
 
 	postgresContainer, err := postgres.Run(ctx,
-		"postgres:16-alpine",
+		integrationPostgresImage,
 		postgres.WithDatabase("site_checker"),
 		postgres.WithUsername("site_checker"),
 		postgres.WithPassword("site_checker"),

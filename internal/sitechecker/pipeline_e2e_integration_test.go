@@ -28,7 +28,7 @@ func TestPersistedCheckPipelineEndToEnd(t *testing.T) {
 	defer cancel()
 
 	postgresContainer, err := postgres.Run(ctx,
-		"postgres:16-alpine",
+		integrationPostgresImage,
 		postgres.WithDatabase("site_checker"),
 		postgres.WithUsername("site_checker"),
 		postgres.WithPassword("site_checker"),
@@ -44,7 +44,7 @@ func TestPersistedCheckPipelineEndToEnd(t *testing.T) {
 	}()
 
 	rabbitContainer, err := testcontainers.Run(ctx,
-		"rabbitmq:4-management-alpine",
+		integrationRabbitMQImage,
 		testcontainers.WithEnv(map[string]string{
 			"RABBITMQ_DEFAULT_USER": "site_checker",
 			"RABBITMQ_DEFAULT_PASS": "site_checker",
