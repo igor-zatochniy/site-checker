@@ -241,6 +241,24 @@ func TestPersistedCheckPipelineEndToEnd(t *testing.T) {
 		t.Fatalf("active jobs = %d, want 1", activeJobs)
 	}
 
+	if err := purgeRabbitQueue(queue.url, queue.queueName); err != nil {
+		t.Fatal(err)
+	}
+	purgedJob, err := repo.GetCheckJob(ctx, receipt.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	depth, err = rabbitQueueDepth(queue.url, queue.queueName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if purgedJob.Status != checkJobStatusQueued || depth != 0 {
+		t.Fatalf("purged queue state = status=%s depth=%d, want queued/0", purgedJob.Status, depth)
+	}
+
+	// Queue purge is not detectable while the topology still exists. The
+	// operational recovery procedure deletes the main queue so the existing
+	// topology-loss handler can reconcile and republish persisted queued jobs.
 	if err := deleteRabbitQueue(queue.url, queue.queueName); err != nil {
 		t.Fatal(err)
 	}
@@ -353,6 +371,21 @@ func deleteRabbitQueue(rawURL, queueName string) error {
 	}
 	defer channel.Close()
 	_, err = channel.QueueDelete(queueName, false, false, false)
+	return err
+}
+
+func purgeRabbitQueue(rawURL, queueName string) error {
+	connection, err := amqp.Dial(rawURL)
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	channel, err := connection.Channel()
+	if err != nil {
+		return err
+	}
+	defer channel.Close()
+	_, err = channel.QueuePurge(queueName, false)
 	return err
 }
 

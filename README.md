@@ -245,15 +245,15 @@ Create the local Secret file first:
 cp deploy/kubernetes/secret.example.yaml deploy/kubernetes/local/secret.yaml
 ```
 
-Apply the untracked Secret explicitly, then render the secret-free base:
+Apply the untracked Secret explicitly, then render the local-demo overlay:
 
 ```bash
 kubectl apply -f deploy/kubernetes/namespace.yaml
 kubectl apply -f deploy/kubernetes/local/secret.yaml
-kubectl apply -k deploy/kubernetes/
+kubectl apply -k deploy/kubernetes-overlays/local-demo/
 ```
 
-The local `deploy/kubernetes/local/secret.yaml` file is ignored by git. The checked-in base stays secret-free so CI can render immutable release manifests and production deployments can provide secrets through External Secrets, SOPS, Sealed Secrets, or a managed secret store.
+The local `deploy/kubernetes/local/secret.yaml` file is ignored by git. The local-demo overlay adds the bundled PostgreSQL and RabbitMQ workloads to the secret-free application base. CI can render immutable release manifests from that base, while production deployments can provide secrets through External Secrets, SOPS, Sealed Secrets, or a managed secret store.
 
 The checked-in Kustomize base uses a fixed version tag and never uses `latest`. A `v*` Git tag publishes both the release tag and an immutable `sha-<commit>` tag to GHCR. CI also captures the pushed image digest and uploads a rendered Kubernetes manifest artifact whose application containers use `image@sha256:...`. Use that artifact for production releases:
 
@@ -263,7 +263,7 @@ kubectl apply -f site-checker-kubernetes-vX.Y.Z.yaml
 
 When alerts are enabled, apply the matching digest-pinned `site-checker-alerts-vX.Y.Z.yaml` release artifact after configuring the webhook Secret.
 
-The Kubernetes setup demonstrates:
+The local-demo Kubernetes setup demonstrates:
 
 - API deployment with 2 replicas.
 - Scheduler deployment with 1 replica.
@@ -293,6 +293,18 @@ Expected demonstration:
 - 1 worker: backlog grows.
 - 3 workers: backlog stabilizes.
 - 6 workers: backlog disappears faster.
+
+### RabbitMQ queue operations
+
+Do not purge the main `QUEUE_NAME` queue or apply message TTL/max-length drop policies without an explicit reconciliation procedure. PostgreSQL keeps confirmed jobs in `queued` state, so deleting individual ready messages while the queue still exists cannot be distinguished from a legitimate backlog.
+
+If the main queue has already been purged or a broker policy has dropped ready messages, delete the main queue and do not recreate it manually:
+
+```bash
+rabbitmqctl delete_queue site_checker.checks
+```
+
+Keep the Scheduler and at least one Worker running. Their topology check detects the missing queue, transactionally returns persisted `queued` jobs to the publish path, recreates the durable topology, and republishes the jobs. Confirm the `Recovered queued jobs after RabbitMQ topology loss` log entry and verify that queue depth and completed checks resume before closing the incident.
 
 ## Engineering trade-offs
 

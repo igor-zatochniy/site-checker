@@ -2,6 +2,8 @@ package main
 
 import (
 	"net"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -29,5 +31,19 @@ func TestRunReturnsNonZeroWhenHTTPListenerIsUnavailable(t *testing.T) {
 
 	if code := run(); code == 0 {
 		t.Fatal("run returned exit code 0 after HTTP listener failure")
+	}
+}
+
+func TestRootReadmeUsesLocalDemoKubernetesOverlay(t *testing.T) {
+	content, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readme := strings.ReplaceAll(string(content), "\r\n", "\n")
+	if !strings.Contains(readme, "kubectl apply -k deploy/kubernetes-overlays/local-demo/") {
+		t.Fatal("README Kubernetes quick-start does not apply the local-demo overlay")
+	}
+	if strings.Contains(readme, "kubectl apply -k deploy/kubernetes/\n") {
+		t.Fatal("README Kubernetes quick-start still applies the application-only base")
 	}
 }
