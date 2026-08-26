@@ -30,7 +30,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # --- Stage 2: Production Image ---
 FROM alpine:${ALPINE_VERSION}@${ALPINE_IMAGE_DIGEST}
 
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache upgrade \
+    && apk --no-cache add ca-certificates
 
 # Непривілейований користувач для runtime.
 RUN addgroup -S app && adduser -S -D -H -u 10001 -G app app
