@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 var (
@@ -37,6 +38,7 @@ const (
 	checkJobKindManual           = "manual"
 	minMonitorTimeoutSeconds     = 1
 	maxMonitorTimeoutSeconds     = 60
+	maxMonitorURLLength          = 8192
 	maxChecksPerMonitor          = 500
 	maxProcessedJobIDs           = 10_000
 	maxRetainedCheckJobs         = 10_000
@@ -1078,6 +1080,9 @@ func (s *MonitorStore) Stats(id string) (MonitorStats, error) {
 func validateMonitorInput(input MonitorInput, policy *NetworkPolicy) error {
 	if input.URL == "" {
 		return fmt.Errorf("%w: url is required", ErrInvalidMonitor)
+	}
+	if utf8.RuneCountInString(input.URL) > maxMonitorURLLength {
+		return fmt.Errorf("%w: url must not exceed %d characters", ErrInvalidMonitor, maxMonitorURLLength)
 	}
 	if _, err := url.ParseRequestURI(input.URL); err != nil {
 		return fmt.Errorf("%w: url is invalid", ErrInvalidMonitor)

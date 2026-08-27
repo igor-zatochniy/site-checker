@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +49,16 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}
 	policy := NewNetworkPolicy(cfg)
 	repo := NewPostgresMonitorRepository(pool, policy)
+	oversizedURL := "https://example.com/" + strings.Repeat("a", maxMonitorURLLength)
+	_, err = repo.Create(ctx, MonitorInput{
+		URL:             oversizedURL,
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if !errors.Is(err, ErrInvalidMonitor) {
+		t.Fatalf("Create() with oversized URL error = %v, want ErrInvalidMonitor", err)
+	}
 
 	monitor, err := repo.Create(ctx, MonitorInput{
 		URL:             "https://example.com",
@@ -57,6 +68,17 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	_, err = repo.Update(ctx, monitor.ID, MonitorPatch{URL: &oversizedURL})
+	if !errors.Is(err, ErrInvalidMonitor) {
+		t.Fatalf("Update() with oversized URL error = %v, want ErrInvalidMonitor", err)
+	}
+	unchangedMonitor, err := repo.Get(ctx, monitor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchangedMonitor.URL != monitor.URL {
+		t.Fatalf("URL after rejected update = %q, want %q", unchangedMonitor.URL, monitor.URL)
 	}
 
 	claimed, err := repo.ClaimDueJobs(ctx, 10, time.Minute, defaultMaxJobAttempts)

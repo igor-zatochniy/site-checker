@@ -3,6 +3,7 @@ package sitechecker
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -47,6 +48,40 @@ func TestMonitorStoreClaimDueAvoidsDuplicates(t *testing.T) {
 	}, lease)
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMonitorStoreEnforcesURLLengthLimit(t *testing.T) {
+	cfg := testCheckerConfig(t)
+	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}
+	store := NewMonitorStore(NewNetworkPolicy(cfg))
+
+	prefix := "https://example.com/"
+	maximumURL := prefix + strings.Repeat("a", maxMonitorURLLength-len(prefix))
+	monitor, err := store.Create(MonitorInput{
+		URL:             maximumURL,
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatalf("Create() with maximum-length URL returned error: %v", err)
+	}
+
+	oversizedURL := maximumURL + "a"
+	_, err = store.Create(MonitorInput{
+		URL:             oversizedURL,
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if !errors.Is(err, ErrInvalidMonitor) {
+		t.Fatalf("Create() with oversized URL error = %v, want ErrInvalidMonitor", err)
+	}
+
+	_, err = store.Update(monitor.ID, MonitorPatch{URL: &oversizedURL})
+	if !errors.Is(err, ErrInvalidMonitor) {
+		t.Fatalf("Update() with oversized URL error = %v, want ErrInvalidMonitor", err)
 	}
 }
 

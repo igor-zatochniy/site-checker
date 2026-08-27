@@ -99,6 +99,56 @@ func TestAPIReturnsValidationError(t *testing.T) {
 	}
 }
 
+func TestAPIRejectsOversizedMonitorURL(t *testing.T) {
+	cfg := testCheckerConfig(t)
+	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}
+	policy := NewNetworkPolicy(cfg)
+	store := NewMonitorStore(policy)
+	metrics := NewMetrics("test", "commit", "date", 0)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	service := NewMonitorService(NewInMemoryMonitorRepositoryFromStore(store), nil, metrics, AlertPolicy{}, logger)
+	handler := NewAPIHandler(service, "", logger)
+
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	oversizedURL := "https://example.com/" + strings.Repeat("a", maxMonitorURLLength)
+	createPayload, err := json.Marshal(MonitorInput{
+		URL:             oversizedURL,
+		IntervalSeconds: 60,
+		TimeoutSeconds:  5,
+		ExpectedStatus:  200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := apiRequest(t, server.URL+"/api/v1/monitors", http.MethodPost, string(createPayload))
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("oversized create status = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	createBody := `{"url":"https://example.com","interval_seconds":60,"timeout_seconds":5,"expected_status":200}`
+	resp = apiRequest(t, server.URL+"/api/v1/monitors", http.MethodPost, createBody)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("valid create status = %d, want 201", resp.StatusCode)
+	}
+	var created Monitor
+	decodeResponse(t, resp, &created)
+
+	patchPayload, err := json.Marshal(MonitorPatch{URL: &oversizedURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp = apiRequest(t, server.URL+"/api/v1/monitors/"+created.ID, http.MethodPatch, string(patchPayload))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("oversized update status = %d, want 400", resp.StatusCode)
+	}
+}
+
 func TestAPIRunManualCheckReturnsAcceptedPersistedJob(t *testing.T) {
 	cfg := testCheckerConfig(t)
 	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}

@@ -237,6 +237,7 @@ components:
         url:
           type: string
           format: uri
+          maxLength: 8192
           example: https://example.com
         interval_seconds:
           type: integer
@@ -264,6 +265,7 @@ components:
         url:
           type: string
           format: uri
+          maxLength: 8192
         interval_seconds:
           type: integer
           minimum: 30
