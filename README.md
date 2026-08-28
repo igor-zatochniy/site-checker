@@ -64,6 +64,21 @@ flowchart LR
 
 This keeps the executable boundary separate from application code while avoiding a risky package split that would move multiple production concerns at once.
 
+## Database upgrades
+
+Migrations are append-only and run under a transaction-scoped PostgreSQL advisory lock. Migration `008_monitor_url_length` enforces the same 8,192-character URL limit as the API. It intentionally stops startup when an older database contains oversized monitor URLs; it never truncates or deletes operator data.
+
+Before upgrading an existing deployment, inspect violations without selecting the URL value itself:
+
+```sql
+SELECT id, char_length(url) AS url_length
+FROM monitors
+WHERE char_length(url) > 8192
+ORDER BY url_length DESC, id;
+```
+
+Back up the database and shorten or remove every reported monitor through an audited maintenance procedure before retrying the migration.
+
 ## REST API
 
 - [OpenAPI YAML](api/openapi.yaml)
@@ -255,13 +270,13 @@ kubectl apply -k deploy/kubernetes-overlays/local-demo/
 
 The local `deploy/kubernetes/local/secret.yaml` file is ignored by git. The local-demo overlay adds the bundled PostgreSQL and RabbitMQ workloads to the secret-free application base. CI can render immutable release manifests from that base, while production deployments can provide secrets through External Secrets, SOPS, Sealed Secrets, or a managed secret store.
 
-The checked-in Kustomize base uses a fixed version tag and never uses `latest`. A `v*` Git tag publishes both the release tag and an immutable `sha-<commit>` tag to GHCR. CI also captures the pushed image digest and uploads a rendered Kubernetes manifest artifact whose application containers use `image@sha256:...`. Use that artifact for production releases:
+The checked-in Kustomize base uses a fixed version tag and never uses `latest`. A previously unused `v*` Git tag publishes both the release tag and an immutable `sha-<commit>` tag to GHCR. CI captures the pushed image digest and publishes digest-pinned Kubernetes manifests, the image digest, the SBOM, and SHA-256 checksums as durable GitHub Release assets. The same files are also retained as a workflow artifact for CI diagnostics. Use the GitHub Release manifest for production deployments:
 
 ```bash
 kubectl apply -f site-checker-kubernetes-vX.Y.Z.yaml
 ```
 
-When alerts are enabled, apply the matching digest-pinned `site-checker-alerts-vX.Y.Z.yaml` release artifact after configuring the webhook Secret.
+When alerts are enabled, apply the matching digest-pinned `site-checker-alerts-vX.Y.Z.yaml` GitHub Release asset after configuring the webhook Secret.
 
 The local-demo Kubernetes setup demonstrates:
 

@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/moby/moby/client"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -44,6 +46,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if err := RunMigrations(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
+	verifyPostgresMonitorURLMigration(t, ctx, pool)
 
 	cfg := testCheckerConfig(t)
 	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}
@@ -1261,6 +1264,99 @@ func processPostgresManualCheck(
 		t.Fatal(err)
 	}
 	return monitor
+}
+
+func verifyPostgresMonitorURLMigration(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+
+	const migrationVersion = "008_monitor_url_length"
+	if _, err := pool.Exec(ctx, "ALTER TABLE monitors DROP CONSTRAINT monitors_url_length_check"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, "DELETE FROM schema_migrations WHERE version = $1", migrationVersion); err != nil {
+		t.Fatal(err)
+	}
+
+	oversizedURL := "https://legacy.example/" + strings.Repeat("a", maxMonitorURLLength)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO monitors (
+			id, url, interval_seconds, timeout_seconds, expected_status,
+			status, enabled, next_check_at, created_at, updated_at
+		)
+		VALUES (
+			'legacy_oversized_monitor', $1, 60, 5, 200,
+			'active', true, clock_timestamp(), clock_timestamp(), clock_timestamp()
+		)
+	`, oversizedURL); err != nil {
+		t.Fatal(err)
+	}
+
+	err := RunMigrations(ctx, pool)
+	if err == nil || !strings.Contains(err.Error(), "cannot enforce monitor URL length") {
+		t.Fatalf("migration with oversized legacy URL error = %v, want safe validation failure", err)
+	}
+	if strings.Contains(err.Error(), oversizedURL) {
+		t.Fatal("migration failure disclosed an oversized monitor URL")
+	}
+	var applied bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM schema_migrations
+			WHERE version = $1
+		)
+	`, migrationVersion).Scan(&applied); err != nil {
+		t.Fatal(err)
+	}
+	if applied {
+		t.Fatal("failed URL length migration was recorded as applied")
+	}
+
+	if _, err := pool.Exec(ctx, "DELETE FROM monitors WHERE id = 'legacy_oversized_monitor'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunMigrations(ctx, pool); err != nil {
+		t.Fatalf("migration after oversized URL cleanup failed: %v", err)
+	}
+
+	boundaryPrefix := "https://migration-probe.example/"
+	boundaryURL := boundaryPrefix + strings.Repeat("a", maxMonitorURLLength-len(boundaryPrefix))
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO monitors (
+			id, url, interval_seconds, timeout_seconds, expected_status,
+			status, enabled, next_check_at, created_at, updated_at
+		)
+		VALUES (
+			'oversized_insert_probe', $1, 60, 5, 200,
+			'active', true, clock_timestamp(), clock_timestamp(), clock_timestamp()
+		)
+	`, oversizedURL); !isPostgresCheckViolation(err) {
+		t.Fatalf("oversized direct INSERT error = %v, want PostgreSQL check violation", err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO monitors (
+			id, url, interval_seconds, timeout_seconds, expected_status,
+			status, enabled, next_check_at, created_at, updated_at
+		)
+		VALUES (
+			'url_update_probe', $1, 60, 5, 200,
+			'active', true, clock_timestamp(), clock_timestamp(), clock_timestamp()
+		)
+	`, boundaryURL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE monitors SET url = $1 WHERE id = 'url_update_probe'", oversizedURL); !isPostgresCheckViolation(err) {
+		t.Fatalf("oversized direct UPDATE error = %v, want PostgreSQL check violation", err)
+	}
+	if _, err := pool.Exec(ctx, "DELETE FROM monitors WHERE id = 'url_update_probe'"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func isPostgresCheckViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23514"
 }
 
 func findClaimedJobID(jobs []CheckJobRecord, monitorID string) string {

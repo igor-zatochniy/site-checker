@@ -97,7 +97,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: integration
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - name: Check out repository
@@ -138,6 +138,8 @@ jobs:
         with:
           image: site-checker:ci
           artifact-name: site-checker-sbom.spdx.json
+          output-file: site-checker-sbom.spdx.json
+          upload-release-assets: false
 
       - name: Push scanned release image
         id: release-image
@@ -146,8 +148,21 @@ jobs:
           IMAGE_NAME: ghcr.io/${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          base_tag="$(awk '$1 == "newTag:" { print $2 }' deploy/kubernetes/kustomization.yaml)"
+          alerts_tag="$(awk '$1 == "newTag:" { print $2 }' deploy/kubernetes/alerts/kustomization.yaml)"
+          test "${base_tag}" = "${RELEASE_TAG}"
+          test "${alerts_tag}" = "${RELEASE_TAG}"
+          if docker buildx imagetools inspect "${IMAGE_NAME}:${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Release image tag ${RELEASE_TAG} already exists; refusing to overwrite it" >&2
+            exit 1
+          fi
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "GitHub release ${RELEASE_TAG} already exists; refusing to overwrite it" >&2
+            exit 1
+          fi
           docker tag site-checker:ci "${IMAGE_NAME}:${RELEASE_TAG}"
           docker tag site-checker:ci "${IMAGE_NAME}:sha-${COMMIT_SHA}"
           docker push "${IMAGE_NAME}:${RELEASE_TAG}"
@@ -183,6 +198,7 @@ jobs:
           EOF
           kubectl kustomize dist/release > "dist/site-checker-kubernetes-${RELEASE_TAG}.yaml"
           printf '%s\n' "${IMAGE_NAME}@${IMAGE_DIGEST}" > "dist/site-checker-image-${RELEASE_TAG}.txt"
+          cp site-checker-sbom.spdx.json "dist/site-checker-sbom-${RELEASE_TAG}.spdx.json"
           cp deploy/kubernetes-overlays/managed-backends/managed-backends-egress.yaml "dist/site-checker-managed-backends-egress-${RELEASE_TAG}.yaml"
           test "$(grep -cF "image: ${IMAGE_NAME}@${IMAGE_DIGEST}" "dist/site-checker-kubernetes-${RELEASE_TAG}.yaml")" -eq 3
           mkdir -p dist/release-alerts
@@ -198,6 +214,16 @@ jobs:
           EOF
           kubectl kustomize dist/release-alerts > "dist/site-checker-alerts-${RELEASE_TAG}.yaml"
           test "$(grep -cF "image: ${IMAGE_NAME}@${IMAGE_DIGEST}" "dist/site-checker-alerts-${RELEASE_TAG}.yaml")" -eq 1
+          (
+            cd dist
+            sha256sum \
+              "site-checker-kubernetes-${RELEASE_TAG}.yaml" \
+              "site-checker-alerts-${RELEASE_TAG}.yaml" \
+              "site-checker-managed-backends-egress-${RELEASE_TAG}.yaml" \
+              "site-checker-image-${RELEASE_TAG}.txt" \
+              "site-checker-sbom-${RELEASE_TAG}.spdx.json" \
+              > "site-checker-checksums-${RELEASE_TAG}.txt"
+          )
 
       - name: Upload immutable Kubernetes release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -209,7 +235,28 @@ jobs:
             dist/site-checker-alerts-${{ github.ref_name }}.yaml
             dist/site-checker-managed-backends-egress-${{ github.ref_name }}.yaml
             dist/site-checker-image-${{ github.ref_name }}.txt
+            dist/site-checker-sbom-${{ github.ref_name }}.spdx.json
+            dist/site-checker-checksums-${{ github.ref_name }}.txt
           if-no-files-found: error
+
+      - name: Publish immutable GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release create "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
+            --generate-notes \
+            --title "Site Checker ${RELEASE_TAG}" \
+            "dist/site-checker-kubernetes-${RELEASE_TAG}.yaml" \
+            "dist/site-checker-alerts-${RELEASE_TAG}.yaml" \
+            "dist/site-checker-managed-backends-egress-${RELEASE_TAG}.yaml" \
+            "dist/site-checker-image-${RELEASE_TAG}.txt" \
+            "dist/site-checker-sbom-${RELEASE_TAG}.spdx.json" \
+            "dist/site-checker-checksums-${RELEASE_TAG}.txt"
 
   integration:
     name: Integration tests

@@ -36,11 +36,17 @@ func TestReleaseImageWaitsForIntegrationAndReusesScannedImage(t *testing.T) {
 		t.Fatal("release does not publish the already scanned local image")
 	}
 	globalSection := workflow[:strings.Index(workflow, "\njobs:\n")]
-	if strings.Contains(globalSection, "packages: write") {
-		t.Fatal("workflow grants packages:write globally")
+	if strings.Contains(globalSection, "packages: write") || strings.Contains(globalSection, "contents: write") {
+		t.Fatal("workflow grants release write permissions globally")
 	}
-	if !strings.Contains(dockerJob, "permissions:\n      contents: read\n      packages: write") {
+	if !strings.Contains(dockerJob, "permissions:\n      contents: write\n      packages: write") {
 		t.Fatal("docker release job does not declare scoped package write permission")
+	}
+	if !strings.Contains(dockerJob, "refusing to overwrite it") ||
+		!strings.Contains(dockerJob, "gh release create") ||
+		!strings.Contains(dockerJob, "site-checker-checksums-${RELEASE_TAG}.txt") ||
+		!strings.Contains(dockerJob, "site-checker-sbom-${RELEASE_TAG}.spdx.json") {
+		t.Fatal("release job does not preserve immutable manifests, SBOM, and checksums in a GitHub release")
 	}
 	if !strings.Contains(workflow, "run: go mod verify") || !strings.Contains(workflow, "run: go mod tidy -diff") {
 		t.Fatal("CI does not verify module integrity and tidiness")
@@ -55,6 +61,46 @@ func TestReleaseImageWaitsForIntegrationAndReusesScannedImage(t *testing.T) {
 	for _, line := range strings.Split(string(pagesContent), "\n") {
 		assertActionPinned(t, line)
 	}
+}
+
+func TestKubernetesSourceImagesUseOneReleaseTag(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repositoryRoot := filepath.Join(workingDirectory, "..", "..")
+	baseKustomization := readTestFile(t, filepath.Join(repositoryRoot, "deploy", "kubernetes", "kustomization.yaml"))
+	releaseTagMatch := regexp.MustCompile(`(?m)^\s*newTag:\s*(v[0-9]+\.[0-9]+\.[0-9]+)\s*$`).FindStringSubmatch(baseKustomization)
+	if len(releaseTagMatch) != 2 {
+		t.Fatal("Kubernetes base does not contain one semantic release tag")
+	}
+	releaseTag := releaseTagMatch[1]
+
+	deploymentPaths := []string{
+		filepath.Join(repositoryRoot, "deploy", "kubernetes", "api-deployment.yaml"),
+		filepath.Join(repositoryRoot, "deploy", "kubernetes", "scheduler-deployment.yaml"),
+		filepath.Join(repositoryRoot, "deploy", "kubernetes", "worker-deployment.yaml"),
+		filepath.Join(repositoryRoot, "deploy", "kubernetes", "alerts", "deployment.yaml"),
+	}
+	imageReference := "image: ghcr.io/igor-zatochniy/site-checker:" + releaseTag
+	for _, path := range deploymentPaths {
+		if !strings.Contains(readTestFile(t, path), imageReference) {
+			t.Fatalf("%s is not aligned with Kubernetes release tag %s", path, releaseTag)
+		}
+	}
+	alertsKustomization := readTestFile(t, filepath.Join(repositoryRoot, "deploy", "kubernetes", "alerts", "kustomization.yaml"))
+	if !regexp.MustCompile(`(?m)^\s*newTag:\s*` + regexp.QuoteMeta(releaseTag) + `\s*$`).MatchString(alertsKustomization) {
+		t.Fatalf("alerts kustomization is not aligned with Kubernetes release tag %s", releaseTag)
+	}
+}
+
+func readTestFile(t *testing.T, path string) string {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(content)
 }
 
 func assertActionPinned(t *testing.T, line string) {

@@ -26,7 +26,7 @@ kubectl apply -k deploy/kubernetes-overlays/local-demo/
 
 The Kustomize base contains only Site Checker application roles; demo PostgreSQL and RabbitMQ are supplied exclusively by `kubernetes-overlays/local-demo`. The base also contains a fixed image tag and never uses `latest`.
 
-For every `v*` Git tag, CI pushes the release image, records its registry digest, and uploads a rendered manifest named `site-checker-kubernetes-vX.Y.Z.yaml`. Production deployments should apply that artifact because all Site Checker roles reference the immutable `image@sha256:...` value:
+For every previously unused `v*` Git tag, CI pushes the release image, records its registry digest, and creates a GitHub Release with a rendered manifest named `site-checker-kubernetes-vX.Y.Z.yaml`, the optional alert manifest, the managed-backend policy template, the SBOM, and SHA-256 checksums. Production deployments should apply the GitHub Release manifest because all Site Checker roles reference the immutable `image@sha256:...` value:
 
 ```bash
 kubectl apply -f site-checker-kubernetes-vX.Y.Z.yaml
@@ -96,7 +96,7 @@ kubectl apply -k deploy/kubernetes/alerts/
 ```
 
 Workers create transactional alert events only when the same webhook setting is configured for them. Kubernetes does not refresh environment variables in running containers after a Secret update, so the worker rollout is mandatory when alerts are enabled or the webhook value changes after initial deployment.
-For production releases, apply the digest-pinned `site-checker-alerts-vX.Y.Z.yaml` artifact uploaded by release CI instead of the source overlay.
+For production releases, apply the digest-pinned `site-checker-alerts-vX.Y.Z.yaml` GitHub Release asset instead of the source overlay.
 
 The scheduler enables retention with these defaults: check results 90 days, terminal jobs and delivered/dead outbox events 30 days, and resolved incidents 365 days. Cleanup deletes at most 10,000 rows per table each minute and never removes active jobs, pending/processing alerts, open incidents, or incidents that still have outbox rows. Adjust the retention values in `configmap.yaml` before deployment when longer history is required.
 
