@@ -21,6 +21,8 @@ const databaseRollbackTimeout = 2 * time.Second
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
+var ErrDatabaseSchemaIncompatible = errors.New("database schema is incompatible with this build")
+
 func OpenPostgresPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	return OpenPostgresPoolWithTimeout(ctx, databaseURL, defaultDatabaseOperationTimeout)
 }
@@ -76,19 +78,10 @@ func RunMigrationsWithTimeout(ctx context.Context, pool *pgxpool.Pool, timeout t
 		return err
 	}
 
-	entries, err := fs.ReadDir(migrationFiles, "migrations")
+	names, err := embeddedMigrationNames()
 	if err != nil {
 		return err
 	}
-
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
-			continue
-		}
-		names = append(names, entry.Name())
-	}
-	slices.Sort(names)
 
 	for _, name := range names {
 		version := strings.TrimSuffix(name, filepath.Ext(name))
@@ -113,6 +106,74 @@ func RunMigrationsWithTimeout(ctx context.Context, pool *pgxpool.Pool, timeout t
 	}
 	committed = true
 	return nil
+}
+
+func VerifyPostgresSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	return VerifyPostgresSchemaWithTimeout(ctx, pool, defaultDatabaseOperationTimeout)
+}
+
+func VerifyPostgresSchemaWithTimeout(ctx context.Context, pool *pgxpool.Pool, timeout time.Duration) error {
+	ctx, cancel := databaseTimeoutContext(ctx, timeout, defaultDatabaseOperationTimeout)
+	defer cancel()
+
+	names, err := embeddedMigrationNames()
+	if err != nil {
+		return err
+	}
+
+	rows, err := pool.Query(ctx, "SELECT version FROM schema_migrations")
+	if err != nil {
+		var postgresError *pgconn.PgError
+		if errors.As(err, &postgresError) && postgresError.Code == "42P01" {
+			return fmt.Errorf("%w: migration metadata is missing", ErrDatabaseSchemaIncompatible)
+		}
+		return fmt.Errorf("read schema migration metadata: %w", err)
+	}
+	defer rows.Close()
+
+	applied := make(map[string]struct{}, len(names))
+	for rows.Next() {
+		var version string
+		if err := rows.Scan(&version); err != nil {
+			return fmt.Errorf("scan schema migration metadata: %w", err)
+		}
+		applied[version] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read schema migration metadata: %w", err)
+	}
+
+	missing := make([]string, 0)
+	for _, name := range names {
+		version := strings.TrimSuffix(name, filepath.Ext(name))
+		if _, ok := applied[version]; !ok {
+			missing = append(missing, version)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("%w: missing migrations: %s", ErrDatabaseSchemaIncompatible, strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+func embeddedMigrationNames() ([]string, error) {
+	entries, err := fs.ReadDir(migrationFiles, "migrations")
+	if err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		names = append(names, entry.Name())
+	}
+	slices.Sort(names)
+	if len(names) == 0 {
+		return nil, errors.New("no embedded database migrations found")
+	}
+	return names, nil
 }
 
 func databaseTimeoutContext(parent context.Context, timeout, fallback time.Duration) (context.Context, context.CancelFunc) {

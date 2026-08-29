@@ -43,7 +43,57 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
+
+	startupConfig := Config{
+		StorageType:              "postgres",
+		DatabaseURL:              databaseURL,
+		DatabaseOperationTimeout: 5 * time.Second,
+		DatabaseMigrationTimeout: 5 * time.Second,
+		RunMigrations:            false,
+	}
+	if _, _, err := NewConfiguredRepository(ctx, startupConfig, nil, discardLogger()); !errors.Is(err, ErrDatabaseSchemaIncompatible) {
+		t.Fatalf("NewConfiguredRepository() on empty database error = %v, want ErrDatabaseSchemaIncompatible", err)
+	}
+	if err := VerifyPostgresSchema(ctx, pool); !errors.Is(err, ErrDatabaseSchemaIncompatible) {
+		t.Fatalf("VerifyPostgresSchema() on empty database error = %v, want ErrDatabaseSchemaIncompatible", err)
+	}
 	if err := RunMigrations(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("VerifyPostgresSchema() after migrations: %v", err)
+	}
+	configuredRepository, closeConfiguredRepository, err := NewConfiguredRepository(ctx, startupConfig, nil, discardLogger())
+	if err != nil {
+		t.Fatalf("NewConfiguredRepository() after migrations: %v", err)
+	}
+	if err := configuredRepository.Ping(ctx); err != nil {
+		closeConfiguredRepository()
+		t.Fatalf("configured repository readiness after migrations: %v", err)
+	}
+	closeConfiguredRepository()
+
+	migrationNames, err := embeddedMigrationNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	latestMigration := strings.TrimSuffix(migrationNames[len(migrationNames)-1], ".sql")
+	if _, err := pool.Exec(ctx, "DELETE FROM schema_migrations WHERE version = $1", latestMigration); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyPostgresSchema(ctx, pool); !errors.Is(err, ErrDatabaseSchemaIncompatible) || !strings.Contains(err.Error(), latestMigration) {
+		t.Fatalf("VerifyPostgresSchema() with stale metadata error = %v, want missing %s", err, latestMigration)
+	}
+	if _, err := pool.Exec(ctx, "INSERT INTO schema_migrations(version) VALUES ($1)", latestMigration); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, "INSERT INTO schema_migrations(version) VALUES ('999_future_compatible_schema')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("VerifyPostgresSchema() with additional migration: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "DELETE FROM schema_migrations WHERE version = '999_future_compatible_schema'"); err != nil {
 		t.Fatal(err)
 	}
 	verifyPostgresMonitorURLMigration(t, ctx, pool)

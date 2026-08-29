@@ -39,6 +39,11 @@ func NewConfiguredRepository(ctx context.Context, cfg Config, policy *NetworkPol
 			}
 			logger.Info("Database migrations applied")
 		}
+		if err := VerifyPostgresSchemaWithTimeout(ctx, pool, cfg.DatabaseOperationTimeout); err != nil {
+			pool.Close()
+			return nil, nil, fmt.Errorf("verify database schema: %w", err)
+		}
+		logger.Info("Database schema verified")
 		return NewPostgresMonitorRepositoryWithTimeout(pool, policy, cfg.DatabaseOperationTimeout), pool.Close, nil
 	}
 

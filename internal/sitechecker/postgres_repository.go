@@ -37,9 +37,7 @@ func (r *PostgresMonitorRepository) operationContext(parent context.Context) (co
 }
 
 func (r *PostgresMonitorRepository) Ping(ctx context.Context) error {
-	ctx, cancel := r.operationContext(ctx)
-	defer cancel()
-	return r.pool.Ping(ctx)
+	return VerifyPostgresSchemaWithTimeout(ctx, r.pool, r.operationTimeout)
 }
 
 func (r *PostgresMonitorRepository) Count(ctx context.Context) (int, error) {

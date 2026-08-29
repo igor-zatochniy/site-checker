@@ -2,10 +2,27 @@ package sitechecker
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestEmbeddedMigrationNamesAreOrdered(t *testing.T) {
+	names, err := embeddedMigrationNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) == 0 {
+		t.Fatal("embeddedMigrationNames returned no migrations")
+	}
+	if !slices.IsSorted(names) {
+		t.Fatalf("embedded migration names are not ordered: %v", names)
+	}
+	if got := names[len(names)-1]; got != "008_monitor_url_length.sql" {
+		t.Fatalf("latest embedded migration = %q, want 008_monitor_url_length.sql", got)
+	}
+}
 
 func TestOpenPostgresPoolRedactsParseConfigSecrets(t *testing.T) {
 	testCases := []struct {
