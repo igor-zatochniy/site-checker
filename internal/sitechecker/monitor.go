@@ -716,7 +716,7 @@ func (s *MonitorStore) MarkJobFailed(lease ProcessingLease, lastError string, no
 	if err != nil {
 		return err
 	}
-	if !jobOwnsLease(job, lease) {
+	if !jobOwnsLease(job, lease, now) || !job.LeaseExpiresAt.After(time.Now()) {
 		return ErrStaleJob
 	}
 	retryAt = retryAt.UTC()
@@ -745,7 +745,7 @@ func (s *MonitorStore) MarkJobDead(lease ProcessingLease, lastError string, now,
 	if err != nil {
 		return err
 	}
-	if !jobOwnsLease(job, lease) {
+	if !jobOwnsLease(job, lease, now) || !job.LeaseExpiresAt.After(time.Now()) {
 		return ErrStaleJob
 	}
 
@@ -768,8 +768,9 @@ func (s *MonitorStore) MarkJobDead(lease ProcessingLease, lastError string, now,
 	return nil
 }
 
-func jobOwnsLease(job CheckJobRecord, lease ProcessingLease) bool {
+func jobOwnsLease(job CheckJobRecord, lease ProcessingLease, now time.Time) bool {
 	return job.Status == checkJobStatusProcessing &&
+		job.LeaseExpiresAt.After(now) &&
 		job.ID == lease.JobID &&
 		job.MonitorID == lease.MonitorID &&
 		job.Attempt == lease.Attempt &&
@@ -850,7 +851,8 @@ func (s *MonitorStore) AddCheck(record CheckRecord, lease ProcessingLease) (Moni
 	if job.Status == checkJobStatusCompleted {
 		return monitor, ErrDuplicateJob
 	}
-	if !jobOwnsLease(job, lease) {
+	now := time.Now().UTC()
+	if !jobOwnsLease(job, lease, now) {
 		return Monitor{}, ErrStaleJob
 	}
 	if _, exists := s.processedJobs[record.JobID]; exists {
@@ -858,7 +860,6 @@ func (s *MonitorStore) AddCheck(record CheckRecord, lease ProcessingLease) (Moni
 	}
 	s.rememberProcessedJobLocked(record.JobID)
 
-	now := time.Now().UTC()
 	job.Status = checkJobStatusCompleted
 	job.CompletedAt = now
 	job.ProcessingStartedAt = time.Time{}

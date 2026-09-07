@@ -666,20 +666,31 @@ func (r *PostgresMonitorRepository) MarkJobFailed(ctx context.Context, lease Pro
 	ctx, cancel := r.operationContext(ctx)
 	defer cancel()
 	retryDelay = max(retryDelay, 0)
+	// Read the clock after the row lock: waiting must not extend lease authority.
 	tag, err := r.pool.Exec(ctx, `
+		WITH owned_job AS MATERIALIZED (
+			SELECT id FROM check_jobs
+			WHERE id = $1 AND monitor_id = $2
+				AND status = 'processing' AND attempt = $3 AND lease_token = $4
+			FOR UPDATE
+		), db_clock AS MATERIALIZED (
+			SELECT clock_timestamp() AS now FROM owned_job
+		)
 		UPDATE check_jobs
 		SET status = 'failed',
-			available_at = clock_timestamp() + ($6::bigint * interval '1 microsecond'),
+			available_at = db_clock.now + ($6::bigint * interval '1 microsecond'),
 			processing_started_at = NULL,
 			lease_expires_at = NULL,
 			lease_token = NULL,
 			last_error = $5,
-			updated_at = clock_timestamp()
+			updated_at = db_clock.now
+		FROM db_clock
 		WHERE id = $1
 			AND monitor_id = $2
 			AND status = 'processing'
 			AND attempt = $3
 			AND lease_token = $4
+			AND lease_expires_at > db_clock.now
 	`, lease.JobID, lease.MonitorID, lease.Attempt, lease.LeaseToken, lastError, retryDelay.Microseconds())
 	if err != nil {
 		return err
@@ -698,11 +709,6 @@ func (r *PostgresMonitorRepository) MarkJobDead(ctx context.Context, lease Proce
 		return err
 	}
 	defer rollbackTransaction(ctx, tx)
-	now, err := databaseTime(ctx, tx)
-	if err != nil {
-		return err
-	}
-
 	var monitorID string
 	err = tx.QueryRow(ctx, `
 		SELECT id
@@ -718,22 +724,34 @@ func (r *PostgresMonitorRepository) MarkJobDead(ctx context.Context, lease Proce
 	}
 
 	var kind string
+	var now time.Time
+	// Both monitor and job locks precede the authoritative expiry check.
 	err = tx.QueryRow(ctx, `
+		WITH owned_job AS MATERIALIZED (
+			SELECT id FROM check_jobs
+			WHERE id = $1 AND monitor_id = $2
+				AND status = 'processing' AND attempt = $3 AND lease_token = $4
+			FOR UPDATE
+		), db_clock AS MATERIALIZED (
+			SELECT clock_timestamp() AS now FROM owned_job
+		)
 		UPDATE check_jobs
 		SET status = 'dead',
 			processing_started_at = NULL,
 			lease_expires_at = NULL,
 			lease_token = NULL,
-			completed_at = $6::timestamptz,
+			completed_at = db_clock.now,
 			last_error = $5,
-			updated_at = $6::timestamptz
+			updated_at = db_clock.now
+		FROM db_clock
 		WHERE id = $1
 			AND monitor_id = $2
 			AND status = 'processing'
 			AND attempt = $3
 			AND lease_token = $4
-		RETURNING kind
-	`, lease.JobID, lease.MonitorID, lease.Attempt, lease.LeaseToken, lastError, now.UTC()).Scan(&kind)
+			AND lease_expires_at > db_clock.now
+		RETURNING kind, completed_at
+	`, lease.JobID, lease.MonitorID, lease.Attempt, lease.LeaseToken, lastError).Scan(&kind, &now)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return classifyInactiveJobQuery(ctx, tx, lease.MonitorID, lease.JobID)
 	}
@@ -785,18 +803,19 @@ func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRe
 	}
 
 	var (
-		status     string
-		attempt    int
-		leaseToken sql.NullString
-		kind       string
+		status         string
+		attempt        int
+		leaseToken     sql.NullString
+		leaseExpiresAt sql.NullTime
+		kind           string
 	)
 	err = tx.QueryRow(ctx, `
-			SELECT status, attempt, lease_token, kind
+			SELECT status, attempt, lease_token, lease_expires_at, kind
 			FROM check_jobs
 			WHERE id = $1
 				AND monitor_id = $2
 			FOR UPDATE
-	`, record.JobID, record.MonitorID).Scan(&status, &attempt, &leaseToken, &kind)
+	`, record.JobID, record.MonitorID).Scan(&status, &attempt, &leaseToken, &leaseExpiresAt, &kind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Monitor{}, ErrStaleJob
 	}
@@ -816,6 +835,9 @@ func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRe
 	updatedAt, err := databaseTime(ctx, tx)
 	if err != nil {
 		return Monitor{}, err
+	}
+	if !leaseExpiresAt.Valid || !leaseExpiresAt.Time.After(updatedAt) {
+		return Monitor{}, ErrStaleJob
 	}
 
 	tag, err := tx.Exec(ctx, `
@@ -856,6 +878,11 @@ func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRe
 		return Monitor{}, err
 	}
 
+	if err := upsertIncidentAndAlert(ctx, tx, record, monitor, alertPolicy, updatedAt); err != nil {
+		return Monitor{}, err
+	}
+
+	// Recheck after all writes so expiry during persistence rolls back every effect.
 	tag, err = tx.Exec(ctx, `
 			UPDATE check_jobs
 			SET status = 'completed',
@@ -870,6 +897,7 @@ func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRe
 				AND status = 'processing'
 				AND attempt = $3
 				AND lease_token = $4
+				AND lease_expires_at > clock_timestamp()
 		`, record.JobID, record.MonitorID, lease.Attempt, lease.LeaseToken, updatedAt)
 	if err != nil {
 		return Monitor{}, err
@@ -878,9 +906,6 @@ func (r *PostgresMonitorRepository) AddCheck(ctx context.Context, record CheckRe
 		return Monitor{}, ErrStaleJob
 	}
 
-	if err := upsertIncidentAndAlert(ctx, tx, record, monitor, alertPolicy, updatedAt); err != nil {
-		return Monitor{}, err
-	}
 	if err := tx.Commit(ctx); err != nil {
 		return Monitor{}, err
 	}

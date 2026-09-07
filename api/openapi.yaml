@@ -21,6 +21,8 @@ paths:
         - $ref: "#/components/parameters/Offset"
         - $ref: "#/components/parameters/Limit"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Monitor list
           content:
@@ -45,6 +47,8 @@ paths:
                   timeout_seconds: 5
                   expected_status: 200
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "201":
           description: Monitor created
           content:
@@ -63,6 +67,8 @@ paths:
       summary: Get monitor
       operationId: getMonitor
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Monitor
           content:
@@ -82,6 +88,8 @@ paths:
             schema:
               $ref: "#/components/schemas/MonitorPatch"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Monitor updated
           content:
@@ -99,6 +107,8 @@ paths:
       summary: Delete monitor
       operationId: deleteMonitor
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "204":
           description: Monitor deleted
         "404":
@@ -114,6 +124,8 @@ paths:
         - $ref: "#/components/parameters/Offset"
         - $ref: "#/components/parameters/Limit"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Check history
           content:
@@ -130,6 +142,8 @@ paths:
       summary: Queue manual check
       operationId: runManualCheck
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "202":
           description: Check job persisted for scheduler and worker processing
           content:
@@ -146,6 +160,8 @@ paths:
       summary: Get monitor statistics
       operationId: getMonitorStats
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Monitor statistics
           content:
@@ -169,6 +185,8 @@ paths:
         - $ref: "#/components/parameters/Offset"
         - $ref: "#/components/parameters/Limit"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "200":
           description: Incident list
           content:
@@ -210,6 +228,16 @@ components:
         maximum: 100
         default: 50
   responses:
+    Unauthorized:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: unauthorized
+              message: valid API key is required
     BadRequest:
       description: Invalid request
       content:
