@@ -59,6 +59,9 @@ func TestRabbitMQQueueRetriesAndDeadLetters(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer queue.Close()
+	if queue.connection().IsRecoveryEnabled() {
+		t.Fatal("library recovery must not compete with application-owned recovery")
+	}
 
 	var topologyRecoveries atomic.Int32
 	recoveryHandler := func(context.Context) error {

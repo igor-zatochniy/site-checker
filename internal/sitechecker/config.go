@@ -31,8 +31,9 @@ const (
 	defaultAlertCooldown             = 10 * time.Minute
 	defaultAlertDispatchInterval     = time.Second
 	defaultAlertDispatchBatch        = 50
-	defaultAlertLeaseTimeout         = 30 * time.Second
+	defaultAlertLeaseTimeout         = time.Minute
 	defaultAlertDeliveryTimeout      = 5 * time.Second
+	alertLeaseSafetyMargin           = 5 * time.Second
 	defaultAlertMaxAttempts          = 8
 	defaultAlertRetryInitial         = time.Second
 	defaultAlertRetryMax             = 5 * time.Minute
@@ -216,8 +217,8 @@ func LoadConfig() (Config, error) {
 	if cfg.AlertRetryMaxBackoff < cfg.AlertRetryInitialBackoff {
 		errs = append(errs, errors.New("ALERT_RETRY_MAX_BACKOFF must be greater than or equal to ALERT_RETRY_INITIAL_BACKOFF"))
 	}
-	if cfg.AlertLeaseTimeout < cfg.AlertDeliveryTimeout {
-		errs = append(errs, errors.New("ALERT_LEASE_TIMEOUT must be greater than or equal to ALERT_DELIVERY_TIMEOUT"))
+	if minimum := minimumAlertLeaseTimeout(cfg.AlertDeliveryTimeout, cfg.DatabaseOperationTimeout); cfg.AlertLeaseTimeout < minimum {
+		errs = append(errs, fmt.Errorf("ALERT_LEASE_TIMEOUT must be at least %s (ALERT_DELIVERY_TIMEOUT + 2 * DATABASE_OPERATION_TIMEOUT + %s safety margin)", minimum, alertLeaseSafetyMargin))
 	}
 	if cfg.UserAgent == "" {
 		errs = append(errs, errors.New("USER_AGENT must not be empty"))
@@ -306,6 +307,11 @@ func minimumCheckLeaseTimeout(databaseOperationTimeout, rabbitMQPublishTimeout t
 	processingBudget := time.Duration(maxMonitorTimeoutSeconds)*time.Second + databaseOperationTimeout
 	publicationBudget := rabbitMQPublishTimeout + databaseOperationTimeout
 	return max(processingBudget, publicationBudget) + processingLeaseSafetyMargin
+}
+
+func minimumAlertLeaseTimeout(deliveryTimeout, databaseOperationTimeout time.Duration) time.Duration {
+	// The lease starts in PostgreSQL before the claim returns to the dispatcher.
+	return deliveryTimeout + 2*databaseOperationTimeout + alertLeaseSafetyMargin
 }
 
 func rabbitMQHeartbeatDisabled(rawURL string) bool {

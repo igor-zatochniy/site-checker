@@ -318,6 +318,8 @@ func (q *RabbitMQQueue) recoverDetectedTopologyLoss(ctx context.Context) error {
 func dialRabbitMQ(ctx context.Context, rawURL string, connectTimeout, writeTimeout time.Duration) (*amqp.Connection, error) {
 	dialer := &net.Dialer{Timeout: connectTimeout}
 	connection, err := amqp.DialConfig(rawURL, amqp.Config{
+		// The application owns reconnect and persisted-job topology recovery.
+		Recovery: nil,
 		Dial: func(network, address string) (net.Conn, error) {
 			conn, err := dialer.DialContext(ctx, network, address)
 			if err != nil {

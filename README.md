@@ -390,7 +390,7 @@ Keep the Scheduler and at least one Worker running. Their topology check detects
 | `ALERT_COOLDOWN` | `10m` | Database-enforced minimum time between alert events for one incident. |
 | `ALERT_DISPATCH_INTERVAL` | `1s` | Poll interval when no immediately available outbox batch remains. |
 | `ALERT_DISPATCH_BATCH_SIZE` | `50` | Maximum outbox events claimed and delivered concurrently per batch. |
-| `ALERT_LEASE_TIMEOUT` | `30s` | Reclaims alert events abandoned by a stopped dispatcher. |
+| `ALERT_LEASE_TIMEOUT` | `1m` | Reclaims abandoned alert events. Must be at least `ALERT_DELIVERY_TIMEOUT + 2 * DATABASE_OPERATION_TIMEOUT + 5s`, covering claim completion, HTTP delivery, database finalization, and scheduling slack. The default minimum is `40s`. Delivery remains at-least-once; receivers must deduplicate the stable `Idempotency-Key`. |
 | `ALERT_DELIVERY_TIMEOUT` | `5s` | Timeout for one webhook delivery attempt. |
 | `ALERT_MAX_ATTEMPTS` | `8` | Delivery attempts before an outbox event is marked `dead`. |
 | `ALERT_RETRY_INITIAL_BACKOFF` | `1s` | Initial persisted retry delay. |
