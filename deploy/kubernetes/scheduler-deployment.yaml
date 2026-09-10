@@ -37,7 +37,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: scheduler
-          image: ghcr.io/igor-zatochniy/site-checker:v0.1.2
+          image: ghcr.io/igor-zatochniy/site-checker:v0.1.3
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
