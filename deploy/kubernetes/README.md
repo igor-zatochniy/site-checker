@@ -44,6 +44,22 @@ kubectl apply -f site-checker-kubernetes-vX.Y.Z.yaml
 
 The managed-backend policy permits API and Alert Dispatcher access to PostgreSQL on TCP 5432, plus Scheduler and Worker access to PostgreSQL and RabbitMQ on TCP 5432, 5671, and 5672. The checked-in TEST-NET CIDRs intentionally match no production backend and keep the template fail-closed until they are replaced. Include every address returned by managed-service DNS and update the policy before endpoint rotation.
 
+### Startup and migration budget
+
+Every application role, including the optional Alert Dispatcher, has a `/healthz` startup probe with a six-minute window (`periodSeconds: 10`, `failureThreshold: 36`). Liveness and readiness probes begin only after startup succeeds. The HTTP listener opens after repository initialization, migrations, schema verification, the initial monitor count, and RabbitMQ initialization where required.
+
+The ConfigMap explicitly sets `DATABASE_MIGRATION_TIMEOUT=2m` and `DATABASE_OPERATION_TIMEOUT=15s`. Allow for two separate migration-timeout budgets: PostgreSQL connection initialization and the migration transaction. With the schema check and initial count (two operation budgets), RabbitMQ connection (`5s`), and a `30s` margin, the default worst-case startup allowance is `305s`. The startup probe covers this allowance without increasing the runtime liveness timeout.
+
+If these timeouts are increased or startup seeding is enabled, increase the startup probe window for every affected role as well. Keep the Deployment `progressDeadlineSeconds` (default `600s`) longer than the startup window and readiness delay. A startup probe does not extend the application's own migration timeout; a migration that exceeds that timeout still fails startup and rolls back.
+
+The already published `v0.1.3` release assets are immutable and predate these startup probes. When deploying that release before a newer bundle is published, add the same startup probe to each digest-pinned application Deployment in a local copy of its manifest, including the separate alert manifest when enabled. Keep the image digests unchanged and record the local manifest change separately from the original release checksums.
+
+### Interrupted release publication
+
+A release is deployable only after its CI run succeeds and the GitHub Release contains the complete manifest, digest, SBOM, and checksum bundle. A registry tag alone is not a completed release.
+
+If CI stops after pushing the version image but before completing the GitHub Release, the current workflow deliberately refuses to reuse that tag. Keep the previous completed release deployed. Prepare a new patch version, align both Kustomizations and all four application image tags, commit that change, and run the release workflow through a new, unused Git tag. Do not delete or move the old Git tag, overwrite registry images, or replace published release assets to make a rerun pass. This is the supported recovery procedure; automatic resumption of a partially published version is not implemented.
+
 Check workloads:
 
 ```bash
@@ -54,9 +70,15 @@ kubectl -n site-checker get networkpolicy
 
 Optional KEDA scaling requires the KEDA operator and CRDs:
 
+The optional `keda/rabbitmq-ingress.yaml` admits only pods labelled `app.kubernetes.io/name=keda-operator` in the `keda` namespace to the bundled RabbitMQ pods on TCP 5672. These selectors match the default KEDA Helm installation. If the operator uses a different namespace or pod label, adjust both selectors before applying the directory. They must remain in the same `from` entry so the namespace and pod restrictions are combined.
+
+For managed RabbitMQ, this local-broker ingress policy has no effect: allow the KEDA operator to reach the managed AMQP endpoint through its namespace egress policy and the broker firewall. Application egress rules in the `site-checker` namespace do not grant access to the KEDA operator.
+
 ```bash
+kubectl -n keda get pods -l app.kubernetes.io/name=keda-operator
 kubectl apply -f deploy/kubernetes/keda/
-kubectl -n site-checker get scaledobject
+kubectl -n site-checker wait --for=condition=Ready scaledobject/site-checker-worker --timeout=120s
+kubectl -n site-checker describe scaledobject site-checker-worker
 ```
 
 Scale demonstration:

@@ -10,6 +10,8 @@ data:
   AUTH_DISABLED: "false"
   STORAGE_TYPE: "postgres"
   RUN_MIGRATIONS: "true"
+  DATABASE_MIGRATION_TIMEOUT: "2m"
+  DATABASE_OPERATION_TIMEOUT: "15s"
   QUEUE_TYPE: "rabbitmq"
   QUEUE_NAME: "site_checker.checks"
   DEAD_LETTER_QUEUE_NAME: "site_checker.checks.dead"

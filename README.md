@@ -278,6 +278,8 @@ kubectl apply -f site-checker-kubernetes-vX.Y.Z.yaml
 
 When alerts are enabled, apply the matching digest-pinned `site-checker-alerts-vX.Y.Z.yaml` GitHub Release asset after configuring the webhook Secret.
 
+The source manifests now protect slow initialization with startup probes; the published `v0.1.3` bundle predates this fix. Follow the [startup budget and interrupted-release instructions](deploy/kubernetes/README.md#startup-and-migration-budget) when deploying an existing bundle or preparing the next release.
+
 The local-demo Kubernetes setup demonstrates:
 
 - API deployment with 2 replicas.
@@ -293,7 +295,10 @@ Apply optional KEDA scaling after installing the KEDA operator:
 
 ```bash
 kubectl apply -f deploy/kubernetes/keda/
+kubectl -n site-checker wait --for=condition=Ready scaledobject/site-checker-worker --timeout=120s
 ```
+
+The included broker ingress policy expects the KEDA operator in namespace `keda` with pod label `app.kubernetes.io/name=keda-operator`. For another installation layout or managed RabbitMQ, follow the [KEDA network requirements](deploy/kubernetes/README.md) before enabling scaling.
 
 Scale workers manually to observe queue-processing behavior:
 
@@ -313,7 +318,7 @@ Expected demonstration:
 
 Do not purge the main `QUEUE_NAME` queue or apply message TTL/max-length drop policies without an explicit reconciliation procedure. PostgreSQL keeps confirmed jobs in `queued` state, so deleting individual ready messages while the queue still exists cannot be distinguished from a legitimate backlog.
 
-If the main queue has already been purged or a broker policy has dropped ready messages, delete the main queue and do not recreate it manually:
+If the main queue has already been purged or a broker policy has dropped ready messages, first remove the TTL, expiry, or overflow/drop policy that caused the loss and stop any external topology controller from recreating the queue. Then delete the main queue and do not recreate it manually:
 
 ```bash
 rabbitmqctl delete_queue site_checker.checks
