@@ -566,6 +566,56 @@ func TestLoadConfigRejectsCheckLeaseBelowOperationBudget(t *testing.T) {
 	}
 }
 
+func TestLoadConfigValidatesDefaultCheckLeaseAgainstOperationBudget(t *testing.T) {
+	for _, budget := range []struct {
+		name            string
+		databaseTimeout string
+		publishTimeout  string
+		minimumLease    string
+	}{
+		{name: "database", databaseTimeout: "2m", publishTimeout: "10s", minimumLease: "3m30s"},
+		{name: "publication", databaseTimeout: "15s", publishTimeout: "5m", minimumLease: "5m45s"},
+	} {
+		t.Run(budget.name, func(t *testing.T) {
+			for _, lease := range []struct {
+				name    string
+				value   string
+				set     bool
+				wantErr bool
+			}{
+				{name: "unset", wantErr: true},
+				{name: "empty", set: true, wantErr: true},
+				{name: "whitespace", value: " \t ", set: true, wantErr: true},
+				{name: "explicit_minimum", value: budget.minimumLease, set: true},
+			} {
+				t.Run(lease.name, func(t *testing.T) {
+					cleanConfigEnv(t)
+					t.Setenv("DATABASE_OPERATION_TIMEOUT", budget.databaseTimeout)
+					t.Setenv("RABBITMQ_PUBLISH_TIMEOUT", budget.publishTimeout)
+					t.Setenv("ALERT_LEASE_TIMEOUT", "10m")
+					if lease.set {
+						t.Setenv("CHECK_LEASE_TIMEOUT", lease.value)
+					}
+
+					cfg, err := LoadConfig()
+					if lease.wantErr {
+						if err == nil || !strings.Contains(err.Error(), "CHECK_LEASE_TIMEOUT must be at least "+budget.minimumLease) {
+							t.Fatalf("LoadConfig error = %v, want dynamic CHECK_LEASE_TIMEOUT minimum %s", err, budget.minimumLease)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatalf("LoadConfig rejected explicit valid CHECK_LEASE_TIMEOUT: %v", err)
+					}
+					if cfg.CheckLeaseTimeout.String() != budget.minimumLease {
+						t.Fatalf("CheckLeaseTimeout = %s, want %s", cfg.CheckLeaseTimeout, budget.minimumLease)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestLoadConfigRejectsProxyWithoutPrivateNetworkTrust(t *testing.T) {
 	cleanConfigEnv(t)
 	t.Setenv("ALLOW_PROXY_ENV", "true")

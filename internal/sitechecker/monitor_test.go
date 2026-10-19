@@ -32,7 +32,7 @@ func TestMonitorStoreClaimDueAvoidsDuplicates(t *testing.T) {
 		t.Fatalf("second claim len = %d, want 0", len(second))
 	}
 
-	if err := store.MarkJobPublished(monitor.ID, first[0].ID, time.Now().UTC()); err != nil {
+	if err := store.MarkJobPublished(currentPublicationClaim(t, store, first[0].ID), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	lease, err := store.MarkJobProcessing(monitor.ID, first[0].ID, 1, time.Now().UTC(), time.Minute)
@@ -104,7 +104,7 @@ func TestMonitorStoreRejectsResultAfterCheckConfigurationChanges(t *testing.T) {
 	if len(jobs) != 1 {
 		t.Fatalf("claimed jobs = %d, want 1", len(jobs))
 	}
-	if err := store.MarkJobPublished(monitor.ID, jobs[0].ID, now); err != nil {
+	if err := store.MarkJobPublished(currentPublicationClaim(t, store, jobs[0].ID), now); err != nil {
 		t.Fatal(err)
 	}
 	lease, err := store.MarkJobProcessing(monitor.ID, jobs[0].ID, 1, now, time.Minute)
@@ -278,7 +278,19 @@ func addStoreManualCheck(t *testing.T, store *MonitorStore, monitorID string, re
 	if !created {
 		t.Fatal("manual job was unexpectedly deduplicated")
 	}
-	if err := store.MarkJobPublished(monitorID, job.ID, now); err != nil {
+	claimed := store.ClaimDueJobs(100, now, time.Minute)
+	found := false
+	for _, claimedJob := range claimed {
+		if claimedJob.ID == job.ID {
+			job = claimedJob
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("manual job %s was not claimed: %+v", job.ID, claimed)
+	}
+	if err := store.MarkJobPublished(currentPublicationClaim(t, store, job.ID), now); err != nil {
 		t.Fatal(err)
 	}
 	lease, err := store.MarkJobProcessing(monitorID, job.ID, 1, now, time.Minute)
@@ -341,10 +353,10 @@ func TestMonitorStoreRecoversQueuedJobOnlyAfterTopologyLoss(t *testing.T) {
 	now := time.Now().UTC()
 	leaseTimeout := time.Minute
 	claimed := store.ClaimDueJobs(1, now, leaseTimeout)
-	if len(claimed) != 1 {
+	if len(claimed) != 1 || claimed[0].MonitorID != monitor.ID {
 		t.Fatalf("claimed = %+v, want one job", claimed)
 	}
-	if err := store.MarkJobPublished(monitor.ID, claimed[0].ID, now); err != nil {
+	if err := store.MarkJobPublished(currentPublicationClaim(t, store, claimed[0].ID), now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -386,7 +398,7 @@ func TestMonitorStoreAllowsOnlyOneWorkerToProcessActiveJob(t *testing.T) {
 	}
 	jobID := claimed[0].ID
 
-	if err := store.MarkJobPublished(monitor.ID, jobID, now.Add(5*time.Second)); err != nil {
+	if err := store.MarkJobPublished(currentPublicationClaim(t, store, jobID), now.Add(5*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.MarkJobProcessing(monitor.ID, jobID, 1, now.Add(10*time.Second), time.Minute); err != nil {
@@ -400,7 +412,7 @@ func TestMonitorStoreAllowsOnlyOneWorkerToProcessActiveJob(t *testing.T) {
 	if len(reclaimed) != 1 || reclaimed[0].ID != jobID {
 		t.Fatalf("reclaimed = %+v, want stale processing job %s", reclaimed, jobID)
 	}
-	if err := store.MarkJobPublished(monitor.ID, jobID, now.Add(2*time.Minute+time.Second)); err != nil {
+	if err := store.MarkJobPublished(currentPublicationClaim(t, store, jobID), now.Add(2*time.Minute+time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.MarkJobProcessing(monitor.ID, jobID, 2, now.Add(2*time.Minute+2*time.Second), time.Minute); err != nil {
@@ -433,7 +445,7 @@ func TestMonitorStorePersistsCheckJobLifecycle(t *testing.T) {
 		t.Fatalf("claimed job = %+v, want scheduled attempt 0", job)
 	}
 
-	if err := store.MarkJobPublished(monitor.ID, job.ID, now.Add(time.Second)); err != nil {
+	if err := store.MarkJobPublished(currentPublicationClaim(t, store, job.ID), now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	firstLease, err := store.MarkJobProcessing(monitor.ID, job.ID, 1, now.Add(2*time.Second), time.Minute)
@@ -453,7 +465,7 @@ func TestMonitorStorePersistsCheckJobLifecycle(t *testing.T) {
 	if len(retryJobs) != 1 || retryJobs[0].Status != checkJobStatusScheduled || retryJobs[0].Attempt != 1 {
 		t.Fatalf("retry jobs = %+v, want scheduled attempt 1", retryJobs)
 	}
-	if err := store.MarkJobPublished(monitor.ID, job.ID, retryAt.Add(time.Second)); err != nil {
+	if err := store.MarkJobPublished(currentPublicationClaim(t, store, job.ID), retryAt.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.MarkJobProcessing(monitor.ID, job.ID, 1, retryAt.Add(2*time.Second), time.Minute); !errors.Is(err, ErrStaleJob) {
@@ -505,7 +517,7 @@ func TestMonitorStoreRejectsStaleWorkerLease(t *testing.T) {
 	if len(jobs) != 1 {
 		t.Fatalf("claimed jobs = %d, want 1", len(jobs))
 	}
-	if err := store.MarkJobPublished(monitor.ID, jobs[0].ID, now); err != nil {
+	if err := store.MarkJobPublished(currentPublicationClaim(t, store, jobs[0].ID), now); err != nil {
 		t.Fatal(err)
 	}
 	staleLease, err := store.MarkJobProcessing(monitor.ID, jobs[0].ID, 1, now, time.Minute)
@@ -517,7 +529,7 @@ func TestMonitorStoreRejectsStaleWorkerLease(t *testing.T) {
 	if len(reclaimed) != 1 || reclaimed[0].ID != jobs[0].ID {
 		t.Fatalf("reclaimed jobs = %+v", reclaimed)
 	}
-	if err := store.MarkJobPublished(monitor.ID, jobs[0].ID, now.Add(2*time.Minute)); err != nil {
+	if err := store.MarkJobPublished(currentPublicationClaim(t, store, jobs[0].ID), now.Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	currentLease, err := store.MarkJobProcessing(monitor.ID, jobs[0].ID, 2, now.Add(2*time.Minute), time.Minute)
@@ -571,7 +583,7 @@ func TestMonitorStoreTerminatesExpiredFinalAttempt(t *testing.T) {
 		t.Fatalf("claimed jobs = %+v, want one", jobs)
 	}
 	jobID := jobs[0].ID
-	if err := store.MarkJobPublished(monitor.ID, jobID, now); err != nil {
+	if err := store.MarkJobPublished(currentPublicationClaim(t, store, jobID), now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.MarkJobProcessing(monitor.ID, jobID, 3, now, time.Minute); err != nil {
@@ -625,7 +637,7 @@ func TestMonitorStoreManualCheckUsesPipelineAndPreservesPeriodicSchedule(t *test
 		t.Fatalf("claimed = %+v, want monitor job %s", claimed, monitor.ID)
 	}
 	jobID := claimed[0].ID
-	if err := store.MarkJobPublished(monitor.ID, jobID, now.Add(5*time.Second)); err != nil {
+	if err := store.MarkJobPublished(currentPublicationClaim(t, store, jobID), now.Add(5*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	scheduledLease, err := store.MarkJobProcessing(monitor.ID, jobID, 1, now.Add(10*time.Second), time.Minute)
@@ -662,7 +674,11 @@ func TestMonitorStoreManualCheckUsesPipelineAndPreservesPeriodicSchedule(t *test
 	if !created || manualJob.Kind != checkJobKindManual {
 		t.Fatalf("manual job = %+v created=%t", manualJob, created)
 	}
-	if err := store.MarkJobPublished(monitor.ID, manualJob.ID, now.Add(31*time.Second)); err != nil {
+	manualClaimed := store.ClaimDueJobs(1, now.Add(30*time.Second), time.Minute)
+	if len(manualClaimed) != 1 || manualClaimed[0].ID != manualJob.ID {
+		t.Fatalf("manual job was not claimed: %+v", manualClaimed)
+	}
+	if err := store.MarkJobPublished(currentPublicationClaim(t, store, manualJob.ID), now.Add(31*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	manualLease, err := store.MarkJobProcessing(monitor.ID, manualJob.ID, 1, now.Add(32*time.Second), time.Minute)
@@ -707,7 +723,7 @@ func TestMonitorStoreFailProcessingUsesCurrentUpdatedAt(t *testing.T) {
 		t.Fatalf("claimed = %+v, want monitor job %s", claimed, monitor.ID)
 	}
 	jobID := claimed[0].ID
-	if err := store.MarkJobPublished(monitor.ID, jobID, claimedAt.Add(5*time.Second)); err != nil {
+	if err := store.MarkJobPublished(currentPublicationClaim(t, store, jobID), claimedAt.Add(5*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	lease, err := store.MarkJobProcessing(monitor.ID, jobID, 1, claimedAt.Add(10*time.Second), time.Minute)
@@ -847,6 +863,15 @@ func TestMonitorStoreBoundsResolvedIncidents(t *testing.T) {
 	}
 }
 
+func currentPublicationClaim(t *testing.T, store *MonitorStore, jobID string) PublicationClaim {
+	t.Helper()
+	job, err := store.CheckJob(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return job.PublicationClaim()
+}
+
 func TestMonitorStoreStats(t *testing.T) {
 	cfg := testCheckerConfig(t)
 	cfg.AllowedPorts = map[int]struct{}{80: {}, 443: {}}
@@ -871,7 +896,11 @@ func TestMonitorStoreStats(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := store.MarkJobPublished(monitor.ID, job.ID, record.CheckedAt); err != nil {
+		claimed := store.ClaimDueJobs(1, record.CheckedAt, time.Minute)
+		if len(claimed) != 1 || claimed[0].ID != job.ID {
+			t.Fatalf("manual job was not claimed: %+v", claimed)
+		}
+		if err := store.MarkJobPublished(currentPublicationClaim(t, store, job.ID), record.CheckedAt); err != nil {
 			t.Fatal(err)
 		}
 		lease, err := store.MarkJobProcessing(monitor.ID, job.ID, 1, record.CheckedAt, time.Minute)

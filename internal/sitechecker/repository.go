@@ -16,8 +16,8 @@ type MonitorRepository interface {
 	Delete(ctx context.Context, id string) error
 	CreateManualJob(ctx context.Context, id string) (CheckJobRecord, bool, error)
 	ClaimDueJobs(ctx context.Context, limit int, leaseTimeout time.Duration, maxAttempts int) ([]CheckJobRecord, error)
-	MarkJobPublished(ctx context.Context, id, jobID string) error
-	ReleaseJobPublish(ctx context.Context, id, jobID, lastError string) error
+	MarkJobPublished(ctx context.Context, claim PublicationClaim) error
+	ReleaseJobPublish(ctx context.Context, claim PublicationClaim, lastError string) error
 	MarkJobProcessing(ctx context.Context, id, jobID string, attempt int, leaseTimeout time.Duration) (ProcessingLease, error)
 	MarkJobFailed(ctx context.Context, lease ProcessingLease, lastError string, retryDelay time.Duration) error
 	MarkJobDead(ctx context.Context, lease ProcessingLease, lastError string) error
@@ -80,12 +80,12 @@ func (r *InMemoryMonitorRepository) ClaimDueJobs(_ context.Context, limit int, l
 	return r.store.ClaimDueJobsWithMaxAttempts(limit, time.Now().UTC(), leaseTimeout, maxAttempts), nil
 }
 
-func (r *InMemoryMonitorRepository) MarkJobPublished(_ context.Context, id, jobID string) error {
-	return r.store.MarkJobPublished(id, jobID, time.Now().UTC())
+func (r *InMemoryMonitorRepository) MarkJobPublished(_ context.Context, claim PublicationClaim) error {
+	return r.store.MarkJobPublished(claim, time.Now().UTC())
 }
 
-func (r *InMemoryMonitorRepository) ReleaseJobPublish(_ context.Context, id, jobID, lastError string) error {
-	return r.store.ReleaseJobPublish(id, jobID, lastError, time.Now().UTC())
+func (r *InMemoryMonitorRepository) ReleaseJobPublish(_ context.Context, claim PublicationClaim, lastError string) error {
+	return r.store.ReleaseJobPublish(claim, lastError, time.Now().UTC())
 }
 
 func (r *InMemoryMonitorRepository) RecoverQueuedJobsAfterTopologyLoss(context.Context) (int64, error) {

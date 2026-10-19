@@ -85,6 +85,7 @@ type CheckJobRecord struct {
 	ProcessingStartedAt time.Time
 	LeaseExpiresAt      time.Time
 	LeaseToken          string
+	PublicationToken    string
 	CompletedAt         time.Time
 	LastError           string
 	CreatedAt           time.Time
@@ -96,6 +97,17 @@ type ProcessingLease struct {
 	MonitorID  string
 	Attempt    int
 	LeaseToken string
+}
+
+type PublicationClaim struct {
+	JobID     string
+	MonitorID string
+	Attempt   int
+	Token     string
+}
+
+func (job CheckJobRecord) PublicationClaim() PublicationClaim {
+	return PublicationClaim{JobID: job.ID, MonitorID: job.MonitorID, Attempt: job.Attempt, Token: job.PublicationToken}
 }
 
 type ManualCheckJobReceipt struct {
@@ -501,6 +513,7 @@ func (s *MonitorStore) ClaimDueJobsWithMaxAttempts(limit int, now time.Time, lea
 		}
 		job.Status = checkJobStatusScheduled
 		job.LeaseExpiresAt = now.Add(leaseTimeout)
+		job.PublicationToken = newID("publish")
 		job.UpdatedAt = now
 		s.checkJobs[job.ID] = job
 		claimed = append(claimed, job)
@@ -532,15 +545,16 @@ func (s *MonitorStore) ClaimDueJobsWithMaxAttempts(limit int, now time.Time, lea
 		}
 
 		job := CheckJobRecord{
-			ID:             NewCheckJobID(monitor.ID, monitor.NextCheckAt),
-			MonitorID:      monitor.ID,
-			Kind:           checkJobKindScheduled,
-			ScheduledFor:   monitor.NextCheckAt.UTC(),
-			Status:         checkJobStatusScheduled,
-			AvailableAt:    now,
-			LeaseExpiresAt: now.Add(leaseTimeout),
-			CreatedAt:      now,
-			UpdatedAt:      now,
+			ID:               NewCheckJobID(monitor.ID, monitor.NextCheckAt),
+			MonitorID:        monitor.ID,
+			Kind:             checkJobKindScheduled,
+			ScheduledFor:     monitor.NextCheckAt.UTC(),
+			Status:           checkJobStatusScheduled,
+			AvailableAt:      now,
+			LeaseExpiresAt:   now.Add(leaseTimeout),
+			PublicationToken: newID("publish"),
+			CreatedAt:        now,
+			UpdatedAt:        now,
 		}
 		s.checkJobs[job.ID] = job
 		s.activeJobByMonitor[monitor.ID] = job.ID
@@ -606,45 +620,60 @@ func (s *MonitorStore) CreateManualJob(id string, now time.Time) (CheckJobRecord
 	return job, true, nil
 }
 
-func (s *MonitorStore) MarkJobPublished(id, jobID string, now time.Time) error {
+func (s *MonitorStore) MarkJobPublished(claim PublicationClaim, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	job, err := s.activeJobLocked(id, jobID)
+	job, err := s.publicationJobLocked(claim)
 	if err != nil {
-		if existing, exists := s.checkJobs[jobID]; exists && existing.MonitorID == id {
-			return nil
-		}
 		return err
 	}
 	if job.Status != checkJobStatusScheduled {
 		return nil
 	}
 	now = now.UTC()
+	if job.Attempt != claim.Attempt || job.LeaseExpiresAt.IsZero() || !job.LeaseExpiresAt.After(now) {
+		return ErrStaleJob
+	}
 	job.Status = checkJobStatusQueued
 	job.PublishedAt = now
 	job.LeaseExpiresAt = time.Time{}
 	job.UpdatedAt = now
-	s.checkJobs[jobID] = job
+	s.checkJobs[claim.JobID] = job
 	return nil
 }
 
-func (s *MonitorStore) ReleaseJobPublish(id, jobID, lastError string, now time.Time) error {
+func (s *MonitorStore) ReleaseJobPublish(claim PublicationClaim, lastError string, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	job, err := s.activeJobLocked(id, jobID)
+	job, err := s.publicationJobLocked(claim)
 	if err != nil {
 		return err
 	}
 	if job.Status != checkJobStatusScheduled {
 		return nil
 	}
+	if job.Attempt != claim.Attempt || job.LeaseExpiresAt.IsZero() || !job.LeaseExpiresAt.After(now) {
+		return ErrStaleJob
+	}
 	job.LeaseExpiresAt = time.Time{}
+	job.PublicationToken = ""
 	job.LastError = lastError
 	job.UpdatedAt = now.UTC()
-	s.checkJobs[jobID] = job
+	s.checkJobs[claim.JobID] = job
 	return nil
+}
+
+func (s *MonitorStore) publicationJobLocked(claim PublicationClaim) (CheckJobRecord, error) {
+	if _, exists := s.byID[claim.MonitorID]; !exists {
+		return CheckJobRecord{}, ErrMonitorNotFound
+	}
+	job, exists := s.checkJobs[claim.JobID]
+	if !exists || job.MonitorID != claim.MonitorID || claim.Token == "" || job.PublicationToken != claim.Token {
+		return CheckJobRecord{}, ErrStaleJob
+	}
+	return job, nil
 }
 
 func (s *MonitorStore) RecoverQueuedJobsAfterTopologyLoss(now time.Time) int64 {
@@ -686,12 +715,8 @@ func (s *MonitorStore) MarkJobProcessing(id, jobID string, attempt int, now time
 			return ProcessingLease{}, ErrStaleJob
 		}
 	case checkJobStatusProcessing:
-		if job.LeaseExpiresAt.IsZero() || job.LeaseExpiresAt.After(now) {
-			return ProcessingLease{}, ErrJobAlreadyProcessing
-		}
-		if attempt < job.Attempt {
-			return ProcessingLease{}, ErrStaleJob
-		}
+		// Only the scheduler can recover an expired processing attempt.
+		return ProcessingLease{}, ErrJobAlreadyProcessing
 	default:
 		return ProcessingLease{}, ErrStaleJob
 	}

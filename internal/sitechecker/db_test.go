@@ -19,8 +19,8 @@ func TestEmbeddedMigrationNamesAreOrdered(t *testing.T) {
 	if !slices.IsSorted(names) {
 		t.Fatalf("embedded migration names are not ordered: %v", names)
 	}
-	if got := names[len(names)-1]; got != "008_monitor_url_length.sql" {
-		t.Fatalf("latest embedded migration = %q, want 008_monitor_url_length.sql", got)
+	if got := names[len(names)-1]; got != "009_publication_claim.sql" {
+		t.Fatalf("latest embedded migration = %q, want 009_publication_claim.sql", got)
 	}
 }
 

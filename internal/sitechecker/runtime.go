@@ -163,6 +163,7 @@ func enqueueDueMonitorJobs(ctx context.Context, service *MonitorService, queue J
 	}
 
 	for _, persistedJob := range jobs {
+		claim := persistedJob.PublicationClaim()
 		message := CheckJobMessage{
 			JobID:      persistedJob.ID,
 			MonitorID:  persistedJob.MonitorID,
@@ -170,7 +171,7 @@ func enqueueDueMonitorJobs(ctx context.Context, service *MonitorService, queue J
 			EnqueuedAt: time.Now().UTC(),
 		}
 		if err := queue.Publish(ctx, message); err != nil {
-			if releaseErr := service.ReleaseJobPublish(ctx, persistedJob.MonitorID, persistedJob.ID, "broker publish failed"); releaseErr != nil {
+			if releaseErr := service.ReleaseJobPublish(ctx, claim, "broker publish failed"); releaseErr != nil && !errors.Is(releaseErr, ErrStaleJob) {
 				logger.Warn("Failed to release check job publish lease",
 					"monitor_id", persistedJob.MonitorID,
 					"job_id", persistedJob.ID,
@@ -181,7 +182,7 @@ func enqueueDueMonitorJobs(ctx context.Context, service *MonitorService, queue J
 			logger.Warn("Failed to publish monitor job", "monitor_id", persistedJob.MonitorID, "job_id", persistedJob.ID, "error", err)
 			continue
 		}
-		if err := service.MarkJobPublished(ctx, persistedJob.MonitorID, persistedJob.ID); err != nil {
+		if err := service.MarkJobPublished(ctx, claim); err != nil && !errors.Is(err, ErrStaleJob) {
 			logger.Warn("Failed to persist published check job state",
 				"monitor_id", persistedJob.MonitorID,
 				"job_id", persistedJob.ID,

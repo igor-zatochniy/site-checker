@@ -145,7 +145,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if claimed[0].Status != checkJobStatusScheduled || claimed[0].Attempt != 0 {
 		t.Fatalf("initial check job = %+v, want scheduled attempt 0", claimed[0])
 	}
-	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID); err != nil {
+	if err := repo.MarkJobPublished(ctx, postgresPublicationClaim(t, ctx, repo, jobID)); err != nil {
 		t.Fatal(err)
 	}
 	staleLease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 1, time.Minute)
@@ -177,7 +177,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if _, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 1, time.Minute); !errors.Is(err, ErrStaleJob) {
 		t.Fatalf("old delivery error = %v, want ErrStaleJob", err)
 	}
-	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID); err != nil {
+	if err := repo.MarkJobPublished(ctx, postgresPublicationClaim(t, ctx, repo, jobID)); err != nil {
 		t.Fatal(err)
 	}
 	retryLease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 2, time.Minute)
@@ -205,7 +205,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if len(retryJobs) != 1 || retryJobs[0].ID != jobID || retryJobs[0].Attempt != 2 {
 		t.Fatalf("retry jobs = %+v, want attempt 2 job", retryJobs)
 	}
-	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID); err != nil {
+	if err := repo.MarkJobPublished(ctx, postgresPublicationClaim(t, ctx, repo, jobID)); err != nil {
 		t.Fatal(err)
 	}
 	finalLease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 3, time.Minute)
@@ -365,7 +365,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if manualScheduledJobID == "" {
 		t.Fatalf("manual monitor periodic job was not claimed: %+v", manualClaimed)
 	}
-	if err := repo.MarkJobPublished(ctx, manualLeaseMonitor.ID, manualScheduledJobID); err != nil {
+	if err := repo.MarkJobPublished(ctx, postgresPublicationClaim(t, ctx, repo, manualScheduledJobID)); err != nil {
 		t.Fatal(err)
 	}
 	manualScheduledLease, err := repo.MarkJobProcessing(ctx, manualLeaseMonitor.ID, manualScheduledJobID, 1, time.Minute)
@@ -417,7 +417,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if !foundFailProcessingMonitor {
 		t.Fatalf("fail-processing monitor was not claimed: %+v", failClaimed)
 	}
-	if err := repo.MarkJobPublished(ctx, failProcessingMonitor.ID, failJobID); err != nil {
+	if err := repo.MarkJobPublished(ctx, postgresPublicationClaim(t, ctx, repo, failJobID)); err != nil {
 		t.Fatal(err)
 	}
 	failLease, err := repo.MarkJobProcessing(ctx, failProcessingMonitor.ID, failJobID, 1, time.Minute)
@@ -468,7 +468,7 @@ func TestPostgresMonitorRepositoryLifecycle(t *testing.T) {
 	if attemptJobID == "" {
 		t.Fatalf("attempt-limit monitor was not claimed: %+v", attemptJobs)
 	}
-	if err := repo.MarkJobPublished(ctx, attemptLimitMonitor.ID, attemptJobID); err != nil {
+	if err := repo.MarkJobPublished(ctx, postgresPublicationClaim(t, ctx, repo, attemptJobID)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := repo.MarkJobProcessing(ctx, attemptLimitMonitor.ID, attemptJobID, 3, time.Minute); err != nil {
@@ -564,7 +564,7 @@ func verifyPostgresUsesAuthoritativeLifecycleClock(
 	if jobID == "" {
 		t.Fatalf("database-clock monitor was not claimed: %+v", jobs)
 	}
-	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID); err != nil {
+	if err := repo.MarkJobPublished(ctx, postgresPublicationClaim(t, ctx, repo, jobID)); err != nil {
 		t.Fatal(err)
 	}
 	dbBeforeProcessing, err := databaseTime(ctx, repo.pool)
@@ -829,7 +829,7 @@ func verifyPostgresRecoversKilledWorkerLease(
 	if jobID == "" {
 		t.Fatalf("killed-worker monitor was not claimed: %+v", jobs)
 	}
-	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID); err != nil {
+	if err := repo.MarkJobPublished(ctx, postgresPublicationClaim(t, ctx, repo, jobID)); err != nil {
 		t.Fatal(err)
 	}
 	firstLease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 1, time.Minute)
@@ -850,7 +850,7 @@ func verifyPostgresRecoversKilledWorkerLease(
 	if recoveredID := findClaimedJobID(recovered, monitor.ID); recoveredID != jobID {
 		t.Fatalf("recovered worker job = %q, want %q", recoveredID, jobID)
 	}
-	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID); err != nil {
+	if err := repo.MarkJobPublished(ctx, postgresPublicationClaim(t, ctx, repo, jobID)); err != nil {
 		t.Fatal(err)
 	}
 	secondLease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 2, time.Minute)
@@ -956,7 +956,7 @@ func verifyPostgresConfigurationUpdateInvalidatesActiveJob(
 	if jobID == "" {
 		t.Fatalf("no job claimed for monitor %s", monitor.ID)
 	}
-	if err := repo.MarkJobPublished(ctx, monitor.ID, jobID); err != nil {
+	if err := repo.MarkJobPublished(ctx, postgresPublicationClaim(t, ctx, repo, jobID)); err != nil {
 		t.Fatal(err)
 	}
 	lease, err := repo.MarkJobProcessing(ctx, monitor.ID, jobID, 1, time.Minute)
@@ -1285,6 +1285,15 @@ func assertPostgresRecordExists(
 	}
 }
 
+func postgresPublicationClaim(t *testing.T, ctx context.Context, repo *PostgresMonitorRepository, jobID string) PublicationClaim {
+	t.Helper()
+	job, err := repo.GetCheckJob(ctx, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return job.PublicationClaim()
+}
+
 func processPostgresManualCheck(
 	t *testing.T,
 	ctx context.Context,
@@ -1301,7 +1310,14 @@ func processPostgresManualCheck(
 	if !created || job.Kind != checkJobKindManual {
 		t.Fatalf("manual job = %+v created=%t", job, created)
 	}
-	if err := repo.MarkJobPublished(ctx, monitorID, job.ID); err != nil {
+	claimed, err := repo.ClaimDueJobs(ctx, 100, time.Minute, defaultMaxJobAttempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimedID := findClaimedJobID(claimed, monitorID); claimedID != job.ID {
+		t.Fatalf("manual job %s was not claimed: %+v", job.ID, claimed)
+	}
+	if err := repo.MarkJobPublished(ctx, postgresPublicationClaim(t, ctx, repo, job.ID)); err != nil {
 		t.Fatal(err)
 	}
 	lease, err := repo.MarkJobProcessing(ctx, monitorID, job.ID, 1, time.Minute)

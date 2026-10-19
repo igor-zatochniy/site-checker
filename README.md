@@ -257,6 +257,7 @@ deploy/kubernetes/
 Create the local Secret file first:
 
 ```bash
+mkdir -p deploy/kubernetes/local
 cp deploy/kubernetes/secret.example.yaml deploy/kubernetes/local/secret.yaml
 ```
 
@@ -434,7 +435,7 @@ APP_ENV=demo AUTH_DISABLED=true go run .
 
 By default, Site Checker blocks private networks, loopback addresses, link-local ranges, metadata IPs such as `169.254.169.254`, unsupported schemes, userinfo in URLs, unexpected ports, unsafe redirects, and environment proxies. Enable overrides only for trusted internal deployments.
 
-`deploy/kubernetes/secret.example.yaml` is a template only. Copy it to an untracked `deploy/kubernetes/local/secret.yaml`, apply that file explicitly, and then apply the secret-free Kustomize base. For production, use External Secrets Operator, SOPS, Sealed Secrets, or a managed secret store with rotation.
+`deploy/kubernetes/secret.example.yaml` is a template only. Create the local directory with `mkdir -p deploy/kubernetes/local`, copy the template to an untracked `deploy/kubernetes/local/secret.yaml`, apply that file explicitly, and then apply the secret-free Kustomize base. For production, use External Secrets Operator, SOPS, Sealed Secrets, or a managed secret store with rotation.
 
 ## License
 

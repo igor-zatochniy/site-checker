@@ -18,6 +18,7 @@ The repository includes `secret.example.yaml` as a template only. Copy it to an 
 Apply locally:
 
 ```bash
+mkdir -p deploy/kubernetes/local
 cp deploy/kubernetes/secret.example.yaml deploy/kubernetes/local/secret.yaml
 kubectl apply -f deploy/kubernetes/namespace.yaml
 kubectl apply -f deploy/kubernetes/local/secret.yaml
@@ -53,6 +54,14 @@ The ConfigMap explicitly sets `DATABASE_MIGRATION_TIMEOUT=2m` and `DATABASE_OPER
 If these timeouts are increased or startup seeding is enabled, increase the startup probe window for every affected role as well. Keep the Deployment `progressDeadlineSeconds` (default `600s`) longer than the startup window and readiness delay. A startup probe does not extend the application's own migration timeout; a migration that exceeds that timeout still fails startup and rolls back.
 
 The already published `v0.1.3` release assets are immutable and predate these startup probes. When deploying that release before a newer bundle is published, add the same startup probe to each digest-pinned application Deployment in a local copy of its manifest, including the separate alert manifest when enabled. Keep the image digests unchanged and record the local manifest change separately from the original release checksums.
+
+### Безпечне оновлення publication fencing
+
+Перед першим оновленням із міграцією `009_publication_claim.sql` зупиніть **усі scheduler-процеси старої версії**, включно з іншими кластерами, зовнішніми процесами та роллю `all`. Дочекайтеся їх повного завершення: старий scheduler не перевіряє `publication_token` і може змінити стан завдання, вже захопленого новою версією. API та workers можуть завершувати наявну роботу під час цієї паузи.
+
+Поки старі scheduler-процеси зупинені, застосуйте міграції новою версією з `RUN_MIGRATIONS=true`, а потім запустіть оновлені scheduler-процеси. Не відновлюйте стару версію scheduler після початку нових publication claims.
+
+Перед оновленням перевірте резервну копію PostgreSQL. Міграція `009` лише додає колонку та її опис; вона не видаляє завдання чи історію перевірок. Чинна retention-політика продовжує діяти й не замінює резервне копіювання.
 
 ### Interrupted release publication
 

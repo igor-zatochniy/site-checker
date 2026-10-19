@@ -324,7 +324,7 @@ func (r *PostgresMonitorRepository) CreateManualJob(ctx context.Context, id stri
 	existing, err := scanCheckJob(tx.QueryRow(ctx, `
 		SELECT id, monitor_id, kind, scheduled_for, status, attempt,
 			available_at, published_at, processing_started_at,
-			lease_expires_at, lease_token, completed_at, last_error, created_at, updated_at
+			lease_expires_at, lease_token, completed_at, last_error, created_at, updated_at, publication_token
 		FROM check_jobs
 		WHERE monitor_id = $1
 			AND status IN ('scheduled', 'queued', 'processing', 'failed')
@@ -350,7 +350,7 @@ func (r *PostgresMonitorRepository) CreateManualJob(ctx context.Context, id stri
 			$3::timestamptz, $3::timestamptz, $3::timestamptz)
 		RETURNING id, monitor_id, kind, scheduled_for, status, attempt,
 			available_at, published_at, processing_started_at,
-			lease_expires_at, lease_token, completed_at, last_error, created_at, updated_at
+			lease_expires_at, lease_token, completed_at, last_error, created_at, updated_at, publication_token
 	`, jobID, id, now))
 	if err != nil {
 		return CheckJobRecord{}, false, err
@@ -446,13 +446,14 @@ func (r *PostgresMonitorRepository) ClaimDueJobs(ctx context.Context, limit int,
 		UPDATE check_jobs j
 		SET status = 'scheduled',
 			lease_expires_at = $3::timestamptz,
+			publication_token = $5 || ':' || j.id,
 			updated_at = $2::timestamptz
 		FROM claimable
 		WHERE j.id = claimable.id
 		RETURNING j.id, j.monitor_id, j.kind, j.scheduled_for, j.status, j.attempt,
 			j.available_at, j.published_at, j.processing_started_at,
-			j.lease_expires_at, j.lease_token, j.completed_at, j.last_error, j.created_at, j.updated_at
-	`, limit, now, leaseExpiresAt, maxAttempts)
+			j.lease_expires_at, j.lease_token, j.completed_at, j.last_error, j.created_at, j.updated_at, j.publication_token
+	`, limit, now, leaseExpiresAt, maxAttempts, newID("publish"))
 	if err != nil {
 		return nil, err
 	}
@@ -506,14 +507,14 @@ func (r *PostgresMonitorRepository) ClaimDueJobs(ctx context.Context, limit int,
 			job, err := scanCheckJob(tx.QueryRow(ctx, `
 				INSERT INTO check_jobs (
 					id, monitor_id, kind, scheduled_for, status, attempt, available_at,
-					lease_expires_at, created_at, updated_at
+					lease_expires_at, created_at, updated_at, publication_token
 				)
 				VALUES ($1, $2, 'scheduled', $3::timestamptz, 'scheduled', 0, $4::timestamptz,
-					$5::timestamptz, $4::timestamptz, $4::timestamptz)
+					$5::timestamptz, $4::timestamptz, $4::timestamptz, $6)
 				RETURNING id, monitor_id, kind, scheduled_for, status, attempt,
 					available_at, published_at, processing_started_at,
-					lease_expires_at, lease_token, completed_at, last_error, created_at, updated_at
-			`, jobID, monitor.id, monitor.nextCheckAt.UTC(), now, leaseExpiresAt))
+					lease_expires_at, lease_token, completed_at, last_error, created_at, updated_at, publication_token
+			`, jobID, monitor.id, monitor.nextCheckAt.UTC(), now, leaseExpiresAt, newID("publish")))
 			if err != nil {
 				return nil, err
 			}
@@ -533,7 +534,7 @@ func (r *PostgresMonitorRepository) GetCheckJob(ctx context.Context, jobID strin
 	job, err := scanCheckJob(r.pool.QueryRow(ctx, `
 		SELECT id, monitor_id, kind, scheduled_for, status, attempt,
 			available_at, published_at, processing_started_at,
-			lease_expires_at, lease_token, completed_at, last_error, created_at, updated_at
+			lease_expires_at, lease_token, completed_at, last_error, created_at, updated_at, publication_token
 		FROM check_jobs
 		WHERE id = $1
 	`, jobID))
@@ -543,47 +544,68 @@ func (r *PostgresMonitorRepository) GetCheckJob(ctx context.Context, jobID strin
 	return job, err
 }
 
-func (r *PostgresMonitorRepository) MarkJobPublished(ctx context.Context, id, jobID string) error {
+func (r *PostgresMonitorRepository) MarkJobPublished(ctx context.Context, claim PublicationClaim) error {
 	ctx, cancel := r.operationContext(ctx)
 	defer cancel()
+	if claim.Token == "" {
+		return ErrStaleJob
+	}
 	tag, err := r.pool.Exec(ctx, `
-		UPDATE check_jobs
+		WITH owned AS MATERIALIZED (
+			SELECT id FROM check_jobs
+			WHERE id = $1 AND monitor_id = $2 AND status = 'scheduled'
+				AND attempt = $3 AND publication_token = $4
+			FOR UPDATE
+		), db_clock AS MATERIALIZED (
+			SELECT clock_timestamp() AS now FROM owned
+		)
+		UPDATE check_jobs AS job
 		SET status = 'queued',
-			published_at = clock_timestamp(),
+			published_at = db_clock.now,
 			lease_expires_at = NULL,
-			updated_at = clock_timestamp()
-		WHERE id = $2
-			AND monitor_id = $1
-			AND status = 'scheduled'
-	`, id, jobID)
+			updated_at = db_clock.now
+		FROM owned, db_clock
+		WHERE job.id = owned.id AND job.lease_expires_at > db_clock.now
+	`, claim.JobID, claim.MonitorID, claim.Attempt, claim.Token)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 1 {
 		return nil
 	}
-	return r.acceptAdvancedJobState(ctx, id, jobID)
+	return r.acceptPublicationProgress(ctx, claim)
 }
 
-func (r *PostgresMonitorRepository) ReleaseJobPublish(ctx context.Context, id, jobID, lastError string) error {
+func (r *PostgresMonitorRepository) ReleaseJobPublish(ctx context.Context, claim PublicationClaim, lastError string) error {
 	ctx, cancel := r.operationContext(ctx)
 	defer cancel()
+	if claim.Token == "" {
+		return ErrStaleJob
+	}
 	tag, err := r.pool.Exec(ctx, `
-		UPDATE check_jobs
+		WITH owned AS MATERIALIZED (
+			SELECT id FROM check_jobs
+			WHERE id = $1 AND monitor_id = $2 AND status = 'scheduled'
+				AND attempt = $3 AND publication_token = $4
+				FOR UPDATE
+		), db_clock AS MATERIALIZED (
+			SELECT clock_timestamp() AS now FROM owned
+		)
+		UPDATE check_jobs AS job
 		SET lease_expires_at = NULL,
-			last_error = $3,
-			updated_at = clock_timestamp()
-		WHERE id = $2
-			AND monitor_id = $1
-			AND status = 'scheduled'
-	`, id, jobID, lastError)
+			publication_token = NULL,
+			last_error = $5,
+			updated_at = db_clock.now
+		FROM owned, db_clock
+		WHERE job.id = owned.id AND job.lease_expires_at > db_clock.now
+	`, claim.JobID, claim.MonitorID, claim.Attempt, claim.Token, lastError)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 1 {
 		return nil
 	}
-	return r.acceptAdvancedJobState(ctx, id, jobID)
+	return r.acceptPublicationProgress(ctx, claim)
 }
 
 func (r *PostgresMonitorRepository) RecoverQueuedJobsAfterTopologyLoss(ctx context.Context) (int64, error) {
@@ -635,14 +657,8 @@ func (r *PostgresMonitorRepository) MarkJobProcessing(ctx context.Context, id, j
 		FROM db_clock
 		WHERE id = $2
 			AND monitor_id = $1
-			AND (
-				(status IN ('scheduled', 'queued') AND $3 > attempt)
-				OR (
-					status = 'processing'
-					AND lease_expires_at <= db_clock.now
-					AND $3 >= attempt
-				)
-			)
+			AND status IN ('scheduled', 'queued')
+			AND $3 > attempt
 		RETURNING attempt
 	`, id, jobID, attempt, leaseTimeout.Microseconds(), leaseToken).Scan(&persistedAttempt)
 	if err == nil {
@@ -1208,9 +1224,24 @@ func (r *PostgresMonitorRepository) checkJobStatus(ctx context.Context, monitorI
 	return "", classifyInactiveJobQuery(ctx, r.pool, monitorID, jobID)
 }
 
-func (r *PostgresMonitorRepository) acceptAdvancedJobState(ctx context.Context, monitorID, jobID string) error {
-	_, err := r.checkJobStatus(ctx, monitorID, jobID)
-	return err
+func (r *PostgresMonitorRepository) acceptPublicationProgress(ctx context.Context, claim PublicationClaim) error {
+	var status string
+	var token sql.NullString
+	err := r.pool.QueryRow(ctx, `
+		SELECT status, publication_token FROM check_jobs
+		WHERE id = $1 AND monitor_id = $2
+	`, claim.JobID, claim.MonitorID).Scan(&status, &token)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return r.classifyInactiveJob(ctx, claim.MonitorID, claim.JobID)
+	}
+	if err != nil {
+		return err
+	}
+	// A worker may advance the same publication before its confirmation is saved.
+	if token.Valid && token.String == claim.Token && status != checkJobStatusScheduled {
+		return nil
+	}
+	return ErrStaleJob
 }
 
 func (r *PostgresMonitorRepository) classifyInactiveJob(ctx context.Context, monitorID, jobID string) error {
@@ -1245,12 +1276,13 @@ type pgxScanner interface {
 
 func scanCheckJob(row pgxScanner) (CheckJobRecord, error) {
 	var (
-		job            CheckJobRecord
-		publishedAt    sql.NullTime
-		processingAt   sql.NullTime
-		leaseExpiresAt sql.NullTime
-		leaseToken     sql.NullString
-		completedAt    sql.NullTime
+		job              CheckJobRecord
+		publishedAt      sql.NullTime
+		processingAt     sql.NullTime
+		leaseExpiresAt   sql.NullTime
+		leaseToken       sql.NullString
+		completedAt      sql.NullTime
+		publicationToken sql.NullString
 	)
 	err := row.Scan(
 		&job.ID,
@@ -1268,6 +1300,7 @@ func scanCheckJob(row pgxScanner) (CheckJobRecord, error) {
 		&job.LastError,
 		&job.CreatedAt,
 		&job.UpdatedAt,
+		&publicationToken,
 	)
 	if err != nil {
 		return CheckJobRecord{}, err
@@ -1286,6 +1319,9 @@ func scanCheckJob(row pgxScanner) (CheckJobRecord, error) {
 	}
 	if completedAt.Valid {
 		job.CompletedAt = completedAt.Time
+	}
+	if publicationToken.Valid {
+		job.PublicationToken = publicationToken.String
 	}
 	return job, nil
 }

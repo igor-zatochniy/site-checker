@@ -160,10 +160,13 @@ func LoadConfig() (Config, error) {
 	cfg.CheckLeaseTimeout = envDuration(
 		"CHECK_LEASE_TIMEOUT",
 		defaultCheckLeaseTimeout,
-		minimumCheckLeaseTimeout(cfg.DatabaseOperationTimeout, cfg.RabbitMQPublishTimeout),
+		time.Second,
 		24*time.Hour,
 		&errs,
 	)
+	if minimum := minimumCheckLeaseTimeout(cfg.DatabaseOperationTimeout, cfg.RabbitMQPublishTimeout); cfg.CheckLeaseTimeout < minimum {
+		errs = append(errs, fmt.Errorf("CHECK_LEASE_TIMEOUT must be at least %s (the larger processing or publication budget plus %s safety margin)", minimum, processingLeaseSafetyMargin))
+	}
 	cfg.HealthAddr = envString("HEALTH_ADDR", defaultHealthAddr)
 	cfg.MaxRedirects = envInt("MAX_REDIRECTS", defaultMaxRedirects, 0, 10, &errs)
 	cfg.MaxBodyBytes = int64(envInt("MAX_BODY_BYTES", defaultMaxBodyBytes, 1024, 10*1024*1024, &errs))

@@ -98,12 +98,12 @@ func (s *MonitorService) QueueManualCheck(ctx context.Context, id string) (Manua
 	}, nil
 }
 
-func (s *MonitorService) MarkJobPublished(ctx context.Context, id, jobID string) error {
-	return s.repo.MarkJobPublished(ctx, id, jobID)
+func (s *MonitorService) MarkJobPublished(ctx context.Context, claim PublicationClaim) error {
+	return s.repo.MarkJobPublished(ctx, claim)
 }
 
-func (s *MonitorService) ReleaseJobPublish(ctx context.Context, id, jobID, lastError string) error {
-	return s.repo.ReleaseJobPublish(ctx, id, jobID, lastError)
+func (s *MonitorService) ReleaseJobPublish(ctx context.Context, claim PublicationClaim, lastError string) error {
+	return s.repo.ReleaseJobPublish(ctx, claim, lastError)
 }
 
 func (s *MonitorService) RecoverQueuedJobsAfterTopologyLoss(ctx context.Context) (int64, error) {

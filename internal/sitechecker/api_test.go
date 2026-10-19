@@ -399,11 +399,11 @@ func (r failingMonitorRepository) ClaimDueJobs(context.Context, int, time.Durati
 	return nil, r.err
 }
 
-func (r failingMonitorRepository) MarkJobPublished(context.Context, string, string) error {
+func (r failingMonitorRepository) MarkJobPublished(context.Context, PublicationClaim) error {
 	return r.err
 }
 
-func (r failingMonitorRepository) ReleaseJobPublish(context.Context, string, string, string) error {
+func (r failingMonitorRepository) ReleaseJobPublish(context.Context, PublicationClaim, string) error {
 	return r.err
 }
 
