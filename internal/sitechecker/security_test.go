@@ -5,12 +5,68 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestCheckRedirectDoesNotForwardMonitorURLSecrets(t *testing.T) {
+	referers := make(chan string, 1)
+	destination := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		referers <- r.Referer()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer destination.Close()
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL, http.StatusFound)
+	}))
+	defer source.Close()
+
+	cfg := testCheckerConfig(t)
+	cfg.AllowPrivateNetworks = true
+	cfg.MaxRedirects = 3
+	cfg.AllowedPorts = make(map[int]struct{})
+	for _, endpoint := range []string{source.URL, destination.URL} {
+		parsed, err := url.Parse(endpoint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		port, err := strconv.Atoi(parsed.Port())
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.AllowedPorts[port] = struct{}{}
+	}
+	client := NewCheckHTTPClient(cfg, NewNetworkPolicy(cfg))
+	client.Transport.(*http.Transport).TLSClientConfig.RootCAs = source.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+	defer client.CloseIdleConnections()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source.URL+"/private-secret-path?token=query-secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("redirected status = %d, want 200", response.StatusCode)
+	}
+	select {
+	case referer := <-referers:
+		if referer != "" {
+			t.Fatalf("redirect forwarded monitor URL in Referer: %q", referer)
+		}
+	case <-ctx.Done():
+		t.Fatal("redirect destination was not called")
+	}
+}
 
 func TestNetworkPolicyPinsValidatedDNSAnswerForDial(t *testing.T) {
 	resolver := &sequenceIPResolver{answers: [][]netip.Addr{

@@ -128,6 +128,8 @@ func (p *NetworkPolicy) CheckRedirect(req *http.Request, via []*http.Request) er
 	if err := p.ValidateParsedURL(req.URL); err != nil {
 		return fmt.Errorf("blocked redirect to %s: %w", redactedURLOrigin(req.URL), err)
 	}
+	// Redirects must not disclose monitor URL paths or query credentials.
+	req.Header.Del("Referer")
 	return nil
 }
 

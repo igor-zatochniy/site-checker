@@ -2,7 +2,7 @@ module github.com/igor-zatochniy/site-checker
 
 go 1.26.0
 
-toolchain go1.26.9
+toolchain go1.26.10
 
 require (
 	github.com/jackc/pgx/v5 v5.10.0

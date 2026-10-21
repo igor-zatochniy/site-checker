@@ -622,10 +622,11 @@ func (r *PostgresMonitorRepository) RecoverQueuedJobsAfterTopologyLoss(ctx conte
 			processing_started_at = NULL,
 			lease_expires_at = NULL,
 			lease_token = NULL,
+			publication_token = NULL,
 			last_error = 'rabbitmq queue topology was lost',
 			updated_at = db_clock.now
 		FROM db_clock
-		WHERE status = 'queued'
+		WHERE status IN ('scheduled', 'queued')
 	`)
 	if err != nil {
 		return 0, err

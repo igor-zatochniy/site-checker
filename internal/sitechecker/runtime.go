@@ -149,7 +149,7 @@ func queueTopologyLossHandler(service *MonitorService, logger *slog.Logger) func
 			return err
 		}
 		if recovered > 0 {
-			logger.Warn("Recovered queued jobs after RabbitMQ topology loss", "jobs", recovered)
+			logger.Warn("Recovered check jobs after RabbitMQ topology loss", "jobs", recovered)
 		}
 		return nil
 	}

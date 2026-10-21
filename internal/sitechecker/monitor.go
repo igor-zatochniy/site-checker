@@ -683,7 +683,7 @@ func (s *MonitorStore) RecoverQueuedJobsAfterTopologyLoss(now time.Time) int64 {
 	now = now.UTC()
 	var recovered int64
 	for jobID, job := range s.checkJobs {
-		if job.Status != checkJobStatusQueued {
+		if job.Status != checkJobStatusScheduled && job.Status != checkJobStatusQueued {
 			continue
 		}
 		job.Status = checkJobStatusFailed
@@ -692,6 +692,7 @@ func (s *MonitorStore) RecoverQueuedJobsAfterTopologyLoss(now time.Time) int64 {
 		job.ProcessingStartedAt = time.Time{}
 		job.LeaseExpiresAt = time.Time{}
 		job.LeaseToken = ""
+		job.PublicationToken = ""
 		job.LastError = "rabbitmq queue topology was lost"
 		job.UpdatedAt = now
 		s.checkJobs[jobID] = job

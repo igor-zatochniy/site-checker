@@ -234,11 +234,13 @@ func TestPostgresExpiredFinalProcessingAttemptCannotBeReacquired(t *testing.T) {
 	}
 }
 
-func publicationTestRepository(t *testing.T, ctx context.Context) *PostgresMonitorRepository {
+func publicationTestRepository(t *testing.T, ctx context.Context, customizers ...testcontainers.ContainerCustomizer) *PostgresMonitorRepository {
 	t.Helper()
-	container, err := postgres.Run(ctx, integrationPostgresImage,
+	options := []testcontainers.ContainerCustomizer{
 		postgres.WithDatabase("site_checker"), postgres.WithUsername("site_checker"),
-		postgres.WithPassword("site_checker"), postgres.BasicWaitStrategies())
+		postgres.WithPassword("site_checker"), postgres.BasicWaitStrategies(),
+	}
+	container, err := postgres.Run(ctx, integrationPostgresImage, append(options, customizers...)...)
 	if container != nil {
 		t.Cleanup(func() {
 			if err := testcontainers.TerminateContainer(container); err != nil {

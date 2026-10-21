@@ -2,9 +2,80 @@ package sitechecker
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 )
+
+func TestTopologyRecoveryRevokesPublicationClaims(t *testing.T) {
+	for _, marked := range []bool{false, true} {
+		name := "recovery_before_publication_mark"
+		if marked {
+			name = "publication_mark_before_recovery"
+		}
+		t.Run(name, func(t *testing.T) {
+			store, monitor, now := publicationTestStore(t)
+			job := store.ClaimDueJobs(1, now, time.Minute)[0]
+			if marked {
+				if err := store.MarkJobPublished(job.PublicationClaim(), now); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if recovered := store.RecoverQueuedJobsAfterTopologyLoss(now); recovered != 1 {
+				t.Fatalf("recovered jobs = %d, want 1", recovered)
+			}
+			for _, callback := range []func() error{
+				func() error { return store.MarkJobPublished(job.PublicationClaim(), now) },
+				func() error { return store.ReleaseJobPublish(job.PublicationClaim(), "late callback", now) },
+			} {
+				if err := callback(); !errors.Is(err, ErrStaleJob) {
+					t.Fatalf("publication callback after topology recovery = %v, want ErrStaleJob", err)
+				}
+			}
+			recovered, err := store.CheckJob(job.ID)
+			if err != nil || recovered.Status != checkJobStatusFailed || recovered.PublicationToken != "" || !recovered.LeaseExpiresAt.IsZero() {
+				t.Fatalf("recovered job = %+v, error = %v", recovered, err)
+			}
+			republished := store.ClaimDueJobs(1, now, time.Minute)[0]
+			if republished.ID != job.ID || republished.PublicationToken == job.PublicationToken {
+				t.Fatalf("republication did not rotate ownership: %+v", republished)
+			}
+			if err := store.MarkJobPublished(republished.PublicationClaim(), now); err != nil {
+				t.Fatal(err)
+			}
+			lease, err := store.MarkJobProcessing(monitor.ID, job.ID, 1, now, time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.AddCheck(CheckRecord{
+				ID: newID("check"), JobID: job.ID, MonitorID: monitor.ID,
+				StatusCode: 200, Success: true, CheckedAt: now,
+			}, lease); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestTopologyRecoveryPreservesProcessingLease(t *testing.T) {
+	store, monitor, now := publicationTestStore(t)
+	job := store.ClaimDueJobs(1, now, time.Minute)[0]
+	lease, err := store.MarkJobProcessing(monitor.ID, job.ID, 1, now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.CheckJob(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered := store.RecoverQueuedJobsAfterTopologyLoss(now); recovered != 0 {
+		t.Fatalf("recovered processing jobs = %d, want 0", recovered)
+	}
+	after, err := store.CheckJob(job.ID)
+	if err != nil || !reflect.DeepEqual(before, after) || after.LeaseToken != lease.LeaseToken {
+		t.Fatalf("topology recovery changed processing lease: before=%+v after=%+v error=%v", before, after, err)
+	}
+}
 
 func publicationTestStore(t *testing.T) (*MonitorStore, Monitor, time.Time) {
 	t.Helper()

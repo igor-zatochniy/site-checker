@@ -310,34 +310,52 @@ components:
         enabled:
           type: boolean
     Monitor:
-      allOf:
-        - $ref: "#/components/schemas/MonitorInput"
-        - type: object
-          required: [id, status, enabled, next_check_at, created_at, updated_at]
-          properties:
-            id:
-              type: string
-            status:
-              type: string
-              enum: [active, disabled]
-            next_check_at:
-              type: string
-              format: date-time
-            created_at:
-              type: string
-              format: date-time
-            updated_at:
-              type: string
-              format: date-time
-            last_status_code:
-              type: integer
-            last_latency_ms:
-              type: integer
-            last_checked_at:
-              type: string
-              format: date-time
-            last_error:
-              type: string
+      type: object
+      additionalProperties: false
+      required: [id, url, interval_seconds, timeout_seconds, expected_status, status, enabled, next_check_at, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        url:
+          type: string
+          format: uri
+          maxLength: 8192
+        interval_seconds:
+          type: integer
+          minimum: 30
+          maximum: 86400
+        timeout_seconds:
+          type: integer
+          minimum: 1
+          maximum: 60
+        expected_status:
+          type: integer
+          minimum: 100
+          maximum: 599
+          description: Exact status expected from the final response after all permitted redirects; intermediate redirect statuses are not matched.
+        status:
+          type: string
+          enum: [active, disabled]
+        enabled:
+          type: boolean
+        next_check_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        last_status_code:
+          type: integer
+        last_latency_ms:
+          type: integer
+        last_checked_at:
+          type: string
+          format: date-time
+        last_error:
+          type: string
     CheckRecord:
       type: object
       required: [id, monitor_id, status_code, latency_ms, success, checked_at]

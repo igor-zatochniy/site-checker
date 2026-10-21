@@ -325,7 +325,7 @@ If the main queue has already been purged or a broker policy has dropped ready m
 rabbitmqctl delete_queue site_checker.checks
 ```
 
-Keep the Scheduler and at least one Worker running. Their topology check detects the missing queue, transactionally returns persisted `queued` jobs to the publish path, recreates the durable topology, and republishes the jobs. Confirm the `Recovered queued jobs after RabbitMQ topology loss` log entry and verify that queue depth and completed checks resume before closing the incident.
+Keep the Scheduler and at least one Worker running. Their topology check detects the missing queue, transactionally returns persisted `queued` jobs and unfinished `scheduled` publication claims to the publish path, recreates the durable topology, and republishes the jobs. Recovery revokes the affected publication tokens so a delayed confirmation for the lost queue cannot mark a recovered job as queued; active processing leases are preserved. Confirm the `Recovered check jobs after RabbitMQ topology loss` log entry and verify that queue depth and completed checks resume before closing the incident.
 
 ## Engineering trade-offs
 
