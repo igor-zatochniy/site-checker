@@ -262,6 +262,12 @@ func (p *NetworkPolicy) ResolveAllowedIPs(ctx context.Context, host string) ([]n
 }
 
 func (p *NetworkPolicy) IsAllowedIP(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	if wellKnownNAT64Prefix.Contains(ip) {
+		// Перевіряємо IPv4-призначення, до якого NAT64 транслює цю адресу.
+		translated := ip.As16()
+		ip = netip.AddrFrom4([4]byte{translated[12], translated[13], translated[14], translated[15]})
+	}
 	if !ip.IsValid() || ip.IsUnspecified() || ip.IsMulticast() {
 		return false
 	}
@@ -302,6 +308,8 @@ func portForURL(parsed *url.URL) (int, error) {
 		return 0, fmt.Errorf("scheme %q is not allowed", parsed.Scheme)
 	}
 }
+
+var wellKnownNAT64Prefix = mustPrefix("64:ff9b::/96")
 
 var blockedNetworkPrefixes = []netip.Prefix{
 	mustPrefix("0.0.0.0/8"),

@@ -6,9 +6,27 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestRabbitMQDoesNotStartOperationWithCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	queue := &RabbitMQQueue{}
+	var called atomic.Bool
+	err := queue.runRabbitMQOperation(ctx, nil, func() error {
+		called.Store(true)
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) || called.Load() {
+		t.Fatalf("operation error = %v, started = %t", err, called.Load())
+	}
+	if err := queue.Ping(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Ping error = %v, want context.Canceled", err)
+	}
+}
 
 func TestInMemoryQueueDeduplicatesPublishedJobs(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

@@ -394,6 +394,9 @@ func (c *rabbitMQDeadlineConn) Write(payload []byte) (int, error) {
 }
 
 func (q *RabbitMQQueue) Ping(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := q.ensureConnected(ctx); err != nil {
 		return err
 	}
@@ -861,6 +864,9 @@ func (q *RabbitMQQueue) deadLetter(ctx context.Context, delivery amqp.Delivery) 
 
 func (q *RabbitMQQueue) ensureConnected(ctx context.Context) error {
 	for attempt := 1; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if q.isConnected() {
 			return nil
 		}
@@ -1060,6 +1066,9 @@ func (q *RabbitMQQueue) closeConnection(ctx context.Context, conn *amqp.Connecti
 }
 
 func (q *RabbitMQQueue) runRabbitMQOperation(ctx context.Context, conn *amqp.Connection, operation func() error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	result := make(chan error, 1)
 	go func() {
 		result <- operation()

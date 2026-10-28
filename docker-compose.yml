@@ -36,9 +36,9 @@ services:
       APP_ENV: ${APP_ENV:-local}
       APP_ROLE: api
       STORAGE_TYPE: postgres
-      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+      DATABASE_URL: "${DATABASE_URL:?Set DATABASE_URL with percent-encoded credentials}"
       QUEUE_TYPE: rabbitmq
-      RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/"
+      RABBITMQ_URL: "${RABBITMQ_URL:?Set RABBITMQ_URL with percent-encoded credentials}"
       API_KEY: ${API_KEY}
       AUTH_DISABLED: ${AUTH_DISABLED:-false}
       ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL:-}"
@@ -57,9 +57,9 @@ services:
       APP_ENV: ${APP_ENV:-local}
       APP_ROLE: scheduler
       STORAGE_TYPE: postgres
-      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+      DATABASE_URL: "${DATABASE_URL:?Set DATABASE_URL with percent-encoded credentials}"
       QUEUE_TYPE: rabbitmq
-      RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/"
+      RABBITMQ_URL: "${RABBITMQ_URL:?Set RABBITMQ_URL with percent-encoded credentials}"
       SEED_DEFAULT_LINKS: ${SEED_DEFAULT_LINKS:-false}
       SEED_URLS_FILE: "${SEED_URLS_FILE:+/config/seed-urls.txt}"
       RETENTION_ENABLED: "true"
@@ -81,9 +81,9 @@ services:
       APP_ENV: ${APP_ENV:-local}
       APP_ROLE: worker
       STORAGE_TYPE: postgres
-      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+      DATABASE_URL: "${DATABASE_URL:?Set DATABASE_URL with percent-encoded credentials}"
       QUEUE_TYPE: rabbitmq
-      RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/"
+      RABBITMQ_URL: "${RABBITMQ_URL:?Set RABBITMQ_URL with percent-encoded credentials}"
       WORKER_COUNT: "5"
       ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL:-}"
       HEALTH_ADDR: :8080
@@ -100,7 +100,7 @@ services:
       APP_ENV: ${APP_ENV:-local}
       APP_ROLE: alert-dispatcher
       STORAGE_TYPE: postgres
-      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+      DATABASE_URL: "${DATABASE_URL:?Set DATABASE_URL with percent-encoded credentials}"
       ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL:-}"
       ALERT_FAILURE_THRESHOLD: "3"
       ALERT_COOLDOWN: 10m

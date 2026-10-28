@@ -254,6 +254,72 @@ func TestNetworkPolicyBlocksLocalUseNAT64Prefix(t *testing.T) {
 	}
 }
 
+func TestNetworkPolicyBlocksPrivateWellKnownNAT64Destinations(t *testing.T) {
+	for _, address := range []string{
+		"64:ff9b::a00:5", "64:ff9b::ac10:1", "64:ff9b::c0a8:1",
+		"64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe", "64:ff9b::6440:1",
+		"64:ff9b::c000:201", "64:ff9b::e000:1", "64:ff9b::",
+	} {
+		t.Run(address, func(t *testing.T) {
+			policy := NewNetworkPolicy(Config{MaxRedirects: 3})
+			ip := netip.MustParseAddr(address)
+			if policy.IsAllowedIP(ip) {
+				t.Fatal("translated forbidden IPv4 destination was allowed")
+			}
+			if err := policy.ValidateURL("http://[" + address + "]/"); err == nil {
+				t.Fatal("NAT64 literal bypassed URL validation")
+			}
+			dialer := &recordingNetworkDialer{}
+			policy.dialer = dialer
+			if conn, err := policy.DialContext(t.Context(), "tcp", net.JoinHostPort(address, "80")); err == nil {
+				conn.Close()
+				t.Fatal("NAT64 literal reached the dialer")
+			}
+			policy.resolver = &sequenceIPResolver{answers: [][]netip.Addr{{ip}}}
+			redirectURL, err := url.Parse("http://nat64.example/next")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := policy.CheckRedirect(&http.Request{URL: redirectURL}, []*http.Request{{}}); err != nil {
+				t.Fatal(err)
+			}
+			if conn, err := policy.DialContext(t.Context(), "tcp", "nat64.example:80"); err == nil {
+				conn.Close()
+				t.Fatal("NAT64 DNS/redirect destination reached the dialer")
+			}
+			if dialer.address != "" {
+				t.Fatalf("forbidden translated destination was dialed: %s", dialer.address)
+			}
+		})
+	}
+}
+
+func TestNetworkPolicyPreservesPublicNAT64AndExplicitPrivateTrust(t *testing.T) {
+	policy := NewNetworkPolicy(Config{})
+	public := netip.MustParseAddr("64:ff9b::101:101")
+	private := netip.MustParseAddr("64:ff9b::a00:5")
+	policy.resolver = &sequenceIPResolver{answers: [][]netip.Addr{{private, public}}}
+	dialer := &recordingNetworkDialer{}
+	policy.dialer = dialer
+	conn, err := policy.DialContext(t.Context(), "tcp", "nat64.example:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if dialer.address != "[64:ff9b::101:101]:443" {
+		t.Fatalf("dialed %q, want the original public NAT64 address", dialer.address)
+	}
+	trusted := NewNetworkPolicy(Config{AllowPrivateNetworks: true})
+	if !trusted.IsAllowedIP(private) {
+		t.Fatal("explicit private-network trust was not preserved")
+	}
+	for _, address := range []string{"64:ff9b::", "64:ff9b::e000:1"} {
+		if trusted.IsAllowedIP(netip.MustParseAddr(address)) {
+			t.Fatal("unspecified or multicast translated destination was allowed")
+		}
+	}
+}
+
 func TestNetworkPolicyAllowsPublicHTTPAndHTTPS(t *testing.T) {
 	policy := NewNetworkPolicy(Config{AllowedPorts: map[int]struct{}{80: {}, 443: {}}})
 

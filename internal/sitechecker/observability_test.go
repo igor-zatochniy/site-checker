@@ -138,3 +138,42 @@ func TestReadinessReportsDependencyFailure(t *testing.T) {
 		t.Fatalf("metrics do not contain rabbitmq dependency down metric:\n%s", string(body))
 	}
 }
+
+func TestReadinessChecksDependenciesIndependently(t *testing.T) {
+	rabbitStarted := make(chan struct{})
+	metrics := NewMetrics("test", "commit", "date", 0)
+	failures := checkReadinessDependencies(t.Context(), metrics, []ReadinessDependency{
+		{Name: "postgres", Check: func(ctx context.Context) error {
+			select {
+			case <-rabbitStarted:
+				return errors.New("database unavailable")
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}},
+		{Name: "rabbitmq", Check: func(ctx context.Context) error {
+			close(rabbitStarted)
+			return ctx.Err()
+		}},
+	})
+	if len(failures) != 1 || failures["postgres"] == "" {
+		t.Fatalf("dependency failures = %v, want only postgres", failures)
+	}
+	if !strings.Contains(metrics.Prometheus(), `site_checker_dependency_up{dependency="rabbitmq"} 1`) {
+		t.Fatal("healthy RabbitMQ was marked down by another dependency")
+	}
+}
+
+func TestReadinessDoesNotStartChecksAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	failures := checkReadinessDependencies(ctx, NewMetrics("test", "commit", "date", 0), []ReadinessDependency{
+		{Name: "rabbitmq", Check: func(context.Context) error {
+			t.Error("dependency operation started after cancellation")
+			return nil
+		}},
+	})
+	if len(failures) != 1 || failures["rabbitmq"] != context.Canceled.Error() {
+		t.Fatalf("failures = %v, want canceled rabbitmq check", failures)
+	}
+}

@@ -86,15 +86,32 @@ func checkReadinessDependencies(ctx context.Context, metrics *Metrics, dependenc
 	checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	failures := make(map[string]string)
+	type dependencyResult struct {
+		name string
+		err  error
+	}
+	results := make(chan dependencyResult, len(dependencies))
+	pending := 0
 	for _, dependency := range dependencies {
 		if dependency.Name == "" || dependency.Check == nil {
 			continue
 		}
-		err := dependency.Check(checkCtx)
-		metrics.SetDependencyUp(dependency.Name, err == nil)
-		if err != nil {
-			failures[dependency.Name] = fmt.Sprintf("%v", err)
+		pending++
+		go func(dependency ReadinessDependency) {
+			err := checkCtx.Err()
+			if err == nil {
+				err = dependency.Check(checkCtx)
+			}
+			results <- dependencyResult{name: dependency.Name, err: err}
+		}(dependency)
+	}
+
+	failures := make(map[string]string)
+	for range pending {
+		result := <-results
+		metrics.SetDependencyUp(result.name, result.err == nil)
+		if result.err != nil {
+			failures[result.name] = fmt.Sprintf("%v", result.err)
 		}
 	}
 	if len(failures) == 0 {

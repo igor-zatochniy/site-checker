@@ -155,8 +155,11 @@ Docker Compose mode:
 
 ```bash
 cp .env.example .env
+# Replace the example credentials and set the matching connection URLs first.
 docker compose up --build
 ```
+
+Set the raw service passwords in `POSTGRES_PASSWORD` / `RABBITMQ_PASSWORD`, and set `DATABASE_URL` / `RABBITMQ_URL` with the same credentials percent-encoded in the URL userinfo. For example, the fixture password `sample/only#pass` becomes `sample%2Fonly%23pass` in a connection URL. Encode username/password components, not the entire URL. Keep connection URLs single-quoted in `.env`. Existing `.env` files need these two URL variables too; Compose now fails with an explicit message when either is missing instead of building an invalid URL from a raw password.
 
 In Compose, `SEED_URLS_FILE` is a host path. When it is non-empty, Compose mounts that file read-only as `/config/seed-urls.txt` inside the scheduler. An empty value disables file seeding.
 
@@ -279,7 +282,7 @@ kubectl apply -f site-checker-kubernetes-vX.Y.Z.yaml
 
 When alerts are enabled, apply the matching digest-pinned `site-checker-alerts-vX.Y.Z.yaml` GitHub Release asset after configuring the webhook Secret.
 
-The source manifests now protect slow initialization with startup probes; the published `v0.1.3` bundle predates this fix. Follow the [startup budget and interrupted-release instructions](deploy/kubernetes/README.md#startup-and-migration-budget) when deploying an existing bundle or preparing the next release.
+Use a completed `v0.1.4` or newer release for new production deployments. The older `v0.1.3` bundle predates the current Go security updates and startup probes. Follow the [startup budget and upgrade instructions](deploy/kubernetes/README.md#startup-and-migration-budget), including the scheduler stop requirement when first applying publication fencing.
 
 The local-demo Kubernetes setup demonstrates:
 

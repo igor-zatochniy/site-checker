@@ -13,4 +13,4 @@ resources:
 images:
   - name: ghcr.io/igor-zatochniy/site-checker
     newName: ghcr.io/igor-zatochniy/site-checker
-    newTag: v0.1.3
+    newTag: v0.1.4

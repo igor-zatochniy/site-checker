@@ -92,10 +92,11 @@ jobs:
           test "$(grep -c 'cidr: 192.0.2.10/32' "${managed_manifest}")" -eq 4
           test "$(grep -c 'cidr: 198.51.100.10/32' "${managed_manifest}")" -eq 2
 
-      - name: Verify rendered startup budgets and KEDA isolation
+      - name: Verify deployment contracts
         env:
           KUBERNETES_RENDER_TEST: "1"
-        run: go test ./internal/sitechecker -run 'TestKubernetes.*StartupBudgets|TestStartupProbeRejectsMigrationOnlyBudget|TestKEDABrokerIngressIsScopedToOperator' -count=1
+          COMPOSE_RENDER_TEST: "1"
+        run: go test ./internal/sitechecker -run 'TestKubernetes.*StartupBudgets|TestStartupProbeRejectsMigrationOnlyBudget|TestKEDABrokerIngressIsScopedToOperator|TestDockerComposePreservesCredentials' -count=1
 
   docker:
     name: Build container
