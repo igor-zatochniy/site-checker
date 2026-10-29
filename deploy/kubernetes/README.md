@@ -53,7 +53,7 @@ The ConfigMap explicitly sets `DATABASE_MIGRATION_TIMEOUT=2m` and `DATABASE_OPER
 
 If these timeouts are increased or startup seeding is enabled, increase the startup probe window for every affected role as well. Keep the Deployment `progressDeadlineSeconds` (default `600s`) longer than the startup window and readiness delay. A startup probe does not extend the application's own migration timeout; a migration that exceeds that timeout still fails startup and rolls back.
 
-Use a completed `v0.1.4` or newer release for new production deployments. The immutable `v0.1.3` artifacts predate both these startup probes and the current Go security updates; changing its YAML alone cannot update its binary. Upgrade through a new release and follow the publication-fencing procedure below instead of overwriting the old image or release assets.
+Use a completed `v0.1.5` or newer release for new production deployments. The `v0.1.4` image does not include RabbitMQ startup-error credential protection or the empty-list API response fixes. The immutable `v0.1.3` artifacts also predate both these startup probes and the current Go security updates; changing YAML alone cannot update a released binary. Upgrade through a new release and follow the publication-fencing procedure below instead of overwriting the old image or release assets.
 
 ### Безпечне оновлення publication fencing
 

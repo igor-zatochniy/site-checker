@@ -282,7 +282,7 @@ kubectl apply -f site-checker-kubernetes-vX.Y.Z.yaml
 
 When alerts are enabled, apply the matching digest-pinned `site-checker-alerts-vX.Y.Z.yaml` GitHub Release asset after configuring the webhook Secret.
 
-Use a completed `v0.1.4` or newer release for new production deployments. The older `v0.1.3` bundle predates the current Go security updates and startup probes. Follow the [startup budget and upgrade instructions](deploy/kubernetes/README.md#startup-and-migration-budget), including the scheduler stop requirement when first applying publication fencing.
+Use a completed `v0.1.5` or newer release for new production deployments. The `v0.1.4` image does not include RabbitMQ startup-error credential protection or the empty-list API response fixes. The older `v0.1.3` bundle also predates the current Go security updates and startup probes. Follow the [startup budget and upgrade instructions](deploy/kubernetes/README.md#startup-and-migration-budget), including the scheduler stop requirement when first applying publication fencing.
 
 The local-demo Kubernetes setup demonstrates:
 
