@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,12 +22,13 @@ import (
 func TestRabbitMQQueueRetriesAndDeadLetters(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+	const password = "fixture/only#pass%@:"
 
 	rabbit, err := testcontainers.Run(ctx,
 		integrationRabbitMQImage,
 		testcontainers.WithEnv(map[string]string{
 			"RABBITMQ_DEFAULT_USER": "site_checker",
-			"RABBITMQ_DEFAULT_PASS": "site_checker",
+			"RABBITMQ_DEFAULT_PASS": password,
 		}),
 		testcontainers.WithExposedPorts("5672/tcp"),
 		testcontainers.WithWaitStrategy(
@@ -48,7 +50,7 @@ func TestRabbitMQQueueRetriesAndDeadLetters(t *testing.T) {
 		t.Fatal(err)
 	}
 	queueConfig := Config{
-		RabbitMQURL:         fmt.Sprintf("amqp://site_checker:site_checker@%s/", endpoint),
+		RabbitMQURL:         fmt.Sprintf("amqp://%s@%s/", url.UserPassword("site_checker", password).String(), endpoint),
 		QueueName:           "site_checker.integration.checks",
 		DeadLetterQueueName: "site_checker.integration.checks.dead",
 		QueuePrefetch:       1,
@@ -304,17 +306,17 @@ func TestRabbitMQQueueRetriesAndDeadLetters(t *testing.T) {
 		t.Fatal("topology recovery unnecessarily replaced the live RabbitMQ connection")
 	}
 
-	testRabbitMQHalfOpenTeardown(t, ctx, endpoint)
+	testRabbitMQHalfOpenTeardown(t, ctx, endpoint, password)
 }
 
-func testRabbitMQHalfOpenTeardown(t *testing.T, ctx context.Context, endpoint string) {
+func testRabbitMQHalfOpenTeardown(t *testing.T, ctx context.Context, endpoint, password string) {
 	t.Helper()
 	proxy := newHalfOpenRabbitMQProxy(t, endpoint)
 	defer proxy.Close()
 
 	publishTimeout := 250 * time.Millisecond
 	config := Config{
-		RabbitMQURL:              fmt.Sprintf("amqp://site_checker:site_checker@%s/", proxy.Addr()),
+		RabbitMQURL:              fmt.Sprintf("amqp://%s@%s/", url.UserPassword("site_checker", password).String(), proxy.Addr()),
 		QueueName:                "site_checker.integration.half_open.publish",
 		DeadLetterQueueName:      "site_checker.integration.half_open.publish.dead",
 		QueuePrefetch:            1,

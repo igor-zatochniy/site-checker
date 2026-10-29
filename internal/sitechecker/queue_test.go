@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -76,15 +77,45 @@ func TestInMemoryQueueDeduplicatesPublishedJobs(t *testing.T) {
 }
 
 func TestDialRabbitMQRedactsMalformedURL(t *testing.T) {
-	secret := "SUPER_SECRET_PASSWORD"
-	rawURL := "amqp://user:" + secret + "@rabbit/%zz"
-
-	_, err := dialRabbitMQ(context.Background(), rawURL, time.Second, time.Second)
-	if err == nil {
-		t.Fatal("dialRabbitMQ returned nil error for malformed URL")
+	const secret = "SYNTHETIC_RABBITMQ_PASSWORD"
+	for _, tc := range []struct {
+		name string
+		uri  string
+	}{
+		{"path escape", "amqp://user:" + secret + "@rabbit/%zz"},
+		{"missing separator", "amqp://user:" + secret + "/rabbit"},
+		{"incomplete userinfo", "amqp://user:" + secret},
+		{"numeric overflow", "amqp://user:" + strings.Repeat("7", 32) + "/rabbit"},
+		{"port out of range", "amqp://user:" + secret + "@rabbit:65536/"},
+		{"zero port", "amqp://user:" + secret + "@rabbit:0/"},
+		{"negative port", "amqp://user:" + secret + "@rabbit:-1/"},
+		{"query parse", "amqp://user:" + secret + "@rabbit/?heartbeat=" + secret},
+		{"userinfo escape", "amqp://user:" + secret + "%zz@rabbit/"},
+		{"invalid scheme", "https://user:" + secret + "@rabbit/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := dialRabbitMQ(t.Context(), tc.uri, time.Second, time.Second)
+			if !errors.Is(err, errInvalidRabbitMQURL) || err.Error() != "invalid RabbitMQ connection URL" {
+				t.Fatal("invalid URI did not return the neutral configuration error")
+			}
+			if errors.Unwrap(err) != nil {
+				t.Fatal("configuration error retained a potentially sensitive parser cause")
+			}
+		})
 	}
-	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), rawURL) {
-		t.Fatalf("dialRabbitMQ error leaked credentials or raw URL: %v", err)
+}
+
+func TestDialRabbitMQPreservesCancellationForValidEncodedURI(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	credentials := url.UserPassword("fixture_user", "fixture/only#pass%@:").String()
+	for _, scheme := range []string{"amqp", "amqps"} {
+		t.Run(scheme, func(t *testing.T) {
+			_, err := dialRabbitMQ(ctx, scheme+"://"+credentials+"@127.0.0.1/", time.Second, time.Second)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("valid URI lost context error classification: %v", err)
+			}
+		})
 	}
 }
 

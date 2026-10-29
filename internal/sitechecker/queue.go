@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
-	"net/url"
 	"sync"
 	"time"
 
@@ -20,6 +19,7 @@ var (
 	ErrQueueConsumerClosed = errors.New("queue consumer closed unexpectedly")
 	ErrRabbitMQReturned    = errors.New("rabbitmq returned unroutable message")
 	ErrRabbitMQNack        = errors.New("rabbitmq publish was negatively acknowledged")
+	errInvalidRabbitMQURL  = errors.New("invalid RabbitMQ connection URL")
 )
 
 type CheckJobMessage struct {
@@ -316,6 +316,11 @@ func (q *RabbitMQQueue) recoverDetectedTopologyLoss(ctx context.Context) error {
 }
 
 func dialRabbitMQ(ctx context.Context, rawURL string, connectTimeout, writeTimeout time.Duration) (*amqp.Connection, error) {
+	uri, err := amqp.ParseURI(rawURL)
+	if err != nil || uri.Port < 1 || uri.Port > 65535 {
+		// Помилки розбору можуть містити пароль; не додаємо їх до ланцюжка помилок.
+		return nil, errInvalidRabbitMQURL
+	}
 	dialer := &net.Dialer{Timeout: connectTimeout}
 	connection, err := amqp.DialConfig(rawURL, amqp.Config{
 		// The application owns reconnect and persisted-job topology recovery.
@@ -338,20 +343,9 @@ func dialRabbitMQ(ctx context.Context, rawURL string, connectTimeout, writeTimeo
 		},
 	})
 	if err != nil {
-		return nil, sanitizeURLParseError(err)
+		return nil, err
 	}
 	return connection, nil
-}
-
-func sanitizeURLParseError(err error) error {
-	if err == nil {
-		return nil
-	}
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) && urlErr.Err != nil {
-		return urlErr.Err
-	}
-	return err
 }
 
 func (c *rabbitMQDeadlineConn) SetDeadline(deadline time.Time) error {

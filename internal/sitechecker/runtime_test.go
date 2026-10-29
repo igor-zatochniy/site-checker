@@ -1,6 +1,7 @@
 package sitechecker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -15,6 +16,27 @@ import (
 	"testing"
 	"time"
 )
+
+func TestRunApplicationRedactsRabbitMQConfigurationErrors(t *testing.T) {
+	for _, secret := range []string{"SYNTHETIC_RABBITMQ_PASSWORD", strings.Repeat("7", 32)} {
+		t.Run(secret, func(t *testing.T) {
+			cleanConfigEnv(t)
+			t.Setenv("QUEUE_TYPE", "rabbitmq")
+			rawURL := "amqp://site_checker:" + secret + "/rabbitmq"
+			t.Setenv("RABBITMQ_URL", rawURL)
+			var logs bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&logs, nil))
+			err := runApplication(t.Context(), "test", "test", "test", logger)
+			if !errors.Is(err, errInvalidRabbitMQURL) {
+				t.Fatal("startup did not fail with the neutral RabbitMQ configuration error")
+			}
+			logger.Error("Site Checker stopped with an error", "error", err)
+			if strings.Contains(err.Error(), secret) || strings.Contains(logs.String(), secret) || strings.Contains(logs.String(), rawURL) {
+				t.Fatal("startup error or JSON log exposed synthetic credentials")
+			}
+		})
+	}
+}
 
 type stoppedConsumerQueue struct {
 	deliveries chan QueueDelivery

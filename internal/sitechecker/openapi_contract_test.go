@@ -1,6 +1,7 @@
 package sitechecker
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -12,6 +13,69 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+func TestAPIEmptyListsMatchOpenAPI(t *testing.T) {
+	repo := NewInMemoryMonitorRepository(NewNetworkPolicy(Config{}))
+	assertEmptyListResponses(t, t.Context(), repo)
+}
+
+func assertEmptyListResponses(t *testing.T, ctx context.Context, repo MonitorRepository) {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	service := NewMonitorService(repo, nil, NewMetrics("test", "test", "test", 0), AlertPolicy{}, logger)
+	mux := http.NewServeMux()
+	NewAPIHandler(service, "", logger).Register(mux)
+	var spec struct {
+		Components struct {
+			Schemas map[string]openAPIObjectSchema `yaml:"schemas"`
+		} `yaml:"components"`
+	}
+	if err := yaml.Unmarshal(openAPISpec, &spec); err != nil {
+		t.Fatal(err)
+	}
+	check := func(path, schema string, total, offset int) {
+		t.Helper()
+		t.Run(path, func(t *testing.T) {
+			if spec.Components.Schemas[schema].Properties["items"].Type != "array" {
+				t.Fatal("OpenAPI list schema must require an array")
+			}
+			recorder := httptest.NewRecorder()
+			mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body)
+			}
+			var response struct {
+				Items  json.RawMessage `json:"items"`
+				Total  int             `json:"total"`
+				Offset int             `json:"offset"`
+				Limit  int             `json:"limit"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if string(response.Items) != "[]" {
+				t.Fatalf("wire items = %s, want []", response.Items)
+			}
+			if response.Total != total || response.Offset != offset || response.Limit != defaultPageLimit {
+				t.Fatalf("incorrect pagination metadata: %s", recorder.Body)
+			}
+		})
+	}
+	check("/api/v1/monitors", "MonitorListResponse", 0, 0)
+	check("/api/v1/incidents", "IncidentListResponse", 0, 0)
+	monitor, err := repo.Create(ctx, MonitorInput{
+		URL: "http://1.1.1.1/empty-list-contract", IntervalSeconds: 60,
+		TimeoutSeconds: 5, ExpectedStatus: 200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("/api/v1/monitors/"+monitor.ID+"/checks", "CheckListResponse", 0, 0)
+	check("/api/v1/monitors?offset=1", "MonitorListResponse", 1, 1)
+	check("/api/v1/monitors?offset=100", "MonitorListResponse", 1, 100)
+	check("/api/v1/monitors/"+monitor.ID+"/checks?offset=100", "CheckListResponse", 0, 100)
+	check("/api/v1/incidents?offset=100", "IncidentListResponse", 0, 100)
+}
 
 type openAPIObjectSchema struct {
 	Ref                  string                         `yaml:"$ref"`

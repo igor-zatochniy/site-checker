@@ -89,6 +89,9 @@ func (h *APIHandler) listMonitors(w http.ResponseWriter, r *http.Request) {
 		h.writeStoreError(w, r, err)
 		return
 	}
+	if items == nil {
+		items = []Monitor{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":  items,
 		"total":  total,
@@ -142,6 +145,9 @@ func (h *APIHandler) listChecks(w http.ResponseWriter, r *http.Request) {
 		h.writeStoreError(w, r, err)
 		return
 	}
+	if items == nil {
+		items = []CheckRecord{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":  items,
 		"total":  total,
@@ -180,6 +186,9 @@ func (h *APIHandler) listIncidents(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.writeStoreError(w, r, err)
 		return
+	}
+	if items == nil {
+		items = []Incident{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":  items,
